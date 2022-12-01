@@ -1,0 +1,2158 @@
+---
+title: "Obstetrics and Gynecology (ObGyn) Cervical Tissue Stiffness Study"
+author: Molly Stout, Peinan Zhao, ... , Simeone Marino, Mingyi Tang, Yang Chen, Ivo
+  D. Dinov
+date: "`r format(Sys.time(), '%D %B %Y')`"
+output:
+  html_document:
+    theme: spacelab
+    highlight: tango
+    code_folding: hide
+    toc: yes
+    number_sections: yes
+    toc_depth: 4
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+tags:
+- DSPA
+- SOCR
+- OBGYN
+- Predictive Analytics
+subtitle: "Fully Quantitative Cervical Elastography System (FQ-CES) - Modeling, Validation
+  & Analytics"
+always_allow_html: yes
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE)
+#knitr::include_graphics("figure.png")
+library(cowplot)
+library(dplyr)
+library(ggExtra)
+library(ggpubr)
+library(ggtext)
+library(lubridate)
+library(plotly)
+library(RColorBrewer)
+library(reshape2)
+library(rmarkdown)
+library(mixtools)
+```
+
+```{r, include=FALSE}
+hooks = knitr::knit_hooks$get()
+hook_foldable = function(type) {
+  force(type)
+  function(x, options) {
+    res = hooks[[type]](x, options)
+    
+    if (isFALSE(options[[paste0("fold.", type)]])) return(res)
+    
+    paste0(
+      "<details><summary>", type, "</summary>\n\n",
+      res,
+      "\n\n</details>"
+    )
+  }
+}
+knitr::knit_hooks$set(
+  output = hook_foldable("output"),
+  plot = hook_foldable("plot")
+)
+```
+
+This UM pregnancy study analyzes *cervical tissue stiffness* using a new quantitative technique, based on ultrasound imaging measures, called *Fully Quantitative Cervical Elastography System (FQ-CES)*. The study includes data from 3 institutions, UM, WashU, and Brown. The main aims of the study are to:
+
+ - Aim 1 (Normals): examine the 3 times measurements of *asymptomatic patients*, establish normative characteristics, distributions, and time-dynamics (linear?) of normal birth, as well as predict pre-term birth;
+ -	Aim 2 (Preterm Birth, PTB): estimate the likelihood of birth/delivery in short time period of time (withon next 7, or 14 days);
+ -	Aim 3 (???): 37 weeks, predict likelihood of spontaneous delivery in 1 or 2 weeks, or post-term delivery, longitudinal model;
+ -	Aim 4 (Vaginal Delivery): At start of labor induction, measure stiffness to predict outcome of successful vaginal delivery
+
+The data includes demographic, CRF (delivery time, and clinical data), delivery outcomes, LMM with GA (gestation age) time effect, patient random effect.
+ 
+
+The main question addressed in this study is:
+
+**Contrast the power of US-derived FQ-CES morphometry measures (obtained using transvaginal ultrasound imaging) against the state-of-the-art clinical approaches including manual inspection, cervical length, and dilation**. 
+
+
+# Background
+... 
+
+# Data Description
+
+The data includes records with the following variable features. *Include a data-dictionary*:
+
+
+
+# Data Import
+Import `PilotData_DeIdentified.csv`.
+```{r error=F, message=FALSE, warning=FALSE}
+
+data = read.csv("FullyQuantitativeCer_DATA_2022-11-02_0853.csv")
+dim(data)
+# Hmisc::describe(data)
+```
+
+For general analysis, we use those patients with aim 1 consent, existence of imaging data, and known delivery outcome
+
+```{r warning=F, message=F, error=F}
+List_A1 <- unique(data$record_id[which(data$a1_consented==1)])
+length(List_A1)
+# we enrolled 491 patients in aim 1
+
+List_Elasto <- unique(data$record_id[which(data$a1_frames==1 & data$a1_calibration_forces==1 & data$a1_calibration_pressures==1)])
+length(List_Elasto)
+# 453 patients with usable Elastography data in total
+
+List_Outcome <- unique(data$record_id[which(data$delivery_ga_days>=0)])
+length(List_Outcome)
+#738 patients with known delivery outcome
+
+Pts_Aim1 <- intersect(intersect(List_Elasto,List_A1),List_Outcome)
+# 442 patients with Aim 1 consent, elastography data, and delivery outcome.
+length(Pts_Aim1)
+
+PilotData_general = data[data$redcap_event_name == "general_arm_1", ]
+dim(PilotData_general)
+PilotData_general = PilotData_general[PilotData_general$record_id %in% Pts_Aim1, ]
+dim(PilotData_general)
+```
+
+
+If Number prior PTB is others, find the specific number
+
+```{r warning=F, message=F, error=F}
+
+for (i in 1:dim(PilotData_general)[1]){
+  if (!is.na(PilotData_general$ptb_20_36_weeks[i])){
+    PilotData_general$ptb_20_36_weeks[i] = 
+      PilotData_general$ptb_20_36_weeks[i] - 1
+    if (PilotData_general$ptb_20_36_weeks[i] == 3){
+      PilotData_general$ptb_20_36_weeks[i] = PilotData_general$ptb_other[i]
+    }
+    if (PilotData_general$ptb_20_36_weeks[i] == 4){
+      PilotData_general$ptb_20_36_weeks[i] = NA
+    }    
+  }
+}
+
+# Set extreme value to NA
+PilotData_general$bmi_1st_visit[PilotData_general$bmi_1st_visit < 0] = NA
+
+# Hmisc::describe(PilotData_general)
+
+```
+
+Calculate age and ga at delivery
+```{r warning=F, message=F, error=F}
+PilotData_general$age = 0
+PilotData_general$AMA = 0
+count = 0
+for (i in 1:dim(PilotData_general)[1]){
+  if (!is.na(PilotData_general$dob[i]) && !is.na(PilotData_general$edc[i])){
+    PilotData_general$age[i] = as.integer(difftime(PilotData_general$edc[i], PilotData_general$dob[i])/365)
+    if (PilotData_general$age[i] >= 35){
+      PilotData_general$AMA[i] = 1
+      count = count + 1
+    }
+  }
+  else{
+    PilotData_general$age[i] = NA
+    PilotData_general$AMA[i] = NA
+  }
+}
+
+PilotData_general$ga_delivery = PilotData_general$delivery_ga_weeks * 7 + PilotData_general$delivery_ga_days
+# PilotData_general$ga_delivery = 0
+# for (i in 1:dim(PilotData_general)[1]){
+#   if (!is.na(PilotData_general$delivery_ga_weeks[i]) && !is.na(PilotData_general$delivery_ga_days[i])){
+#     PilotData_general$ga_delivery[i] = PilotData_general$delivery_ga_weeks[i] * 7 + PilotData_general$delivery_ga_days[i]
+#   }
+#   else{
+#     PilotData_general$ga_delivery[i] = NA
+#   }
+# }
+```
+
+Calculate interval since prior pregnancy
+We cannot find the time period in month since the information about last pregnancy is in year.
+```{r warning=F, message=F, error=F}
+PilotData_general$delivery_history_aim1 = as.numeric(as.character(PilotData_general$delivery_history_aim1))
+
+PilotData_general$interval = 0
+for (i in 1:dim(PilotData_general)[1]){
+  if (!is.na(PilotData_general$edc[i]) && !is.na(PilotData_general$delivery_history_aim1[i]) && PilotData_general$delivery_history_aim1[i] != 1){
+    last_birth_year = as.numeric(as.character(PilotData_general[i, 396 + 21*(PilotData_general$delivery_history_aim1[i]-2)]))
+    if (!is.na(last_birth_year) && last_birth_year > 0){
+      PilotData_general$interval[i] = year(PilotData_general$edc[i]) - last_birth_year
+    }
+    else{
+      PilotData_general$interval[i] = NA
+    }
+  }
+  else{
+    PilotData_general$interval[i] = NA
+  }
+}
+```
+
+Add the variable Nulliparity, prior_preterm
+```{r warning=F, message=F, error=F}
+PilotData_general$Parity = PilotData_general$preterm + PilotData_general$term
+
+
+PilotData_general$Nulliparity = NA
+PilotData_general$Nulliparity[
+  (PilotData_general$term + PilotData_general$preterm) == 0] = "nulliparous"
+PilotData_general$Nulliparity[
+  (PilotData_general$term + PilotData_general$preterm) > 0] = "multiparous"
+PilotData_general$Nulliparity = as.factor(PilotData_general$Nulliparity)
+
+PilotData_general$prior_preterm = NA
+PilotData_general$prior_preterm[PilotData_general$ptb_20_36_weeks == 0] = "yes"
+PilotData_general$prior_preterm[PilotData_general$ptb_20_36_weeks > 0] = "no"
+PilotData_general$prior_preterm = as.factor(PilotData_general$prior_preterm)
+
+
+
+# PilotData_general$prior_preterm = 1 # 1 means Yes, i.e. the woman had prior preterm birth before
+# #count = 0
+# for (i in 1:dim(PilotData_general)[1]){
+#   if (!is.na(PilotData_general$ptb_20_36_weeks[i])){
+#     if (PilotData_general$ptb_20_36_weeks[i] == 0){
+#       PilotData_general$prior_preterm[i] = 0
+#       #count = count + 1
+#     }
+#   }
+#   else{
+#     PilotData_general$prior_preterm[i] = NA
+#   }
+# }
+
+```
+
+# Summary Statystics (Collective and Grouping by Site and Cohort)
+
+## Part 1: AIM 1 Analysis–Description of cervical ripening over pregnancy in asymptomatic individuals 
+
+### Table 1: Baseline Demographic Characteristics of Aim 1 Cohort 
+
+We split the dataset according to the three universities (UM, WU, Brown) and output the decriptive statistics for these datasets.
+
+```{r warning=F, message=F, error=F} 
+PilotData_general_um =
+  PilotData_general[PilotData_general$redcap_data_access_group == "u_mich", ]
+PilotData_general_wu =
+  PilotData_general[PilotData_general$redcap_data_access_group == "washu", ]
+PilotData_general_br =
+  PilotData_general[PilotData_general$redcap_data_access_group == "wih", ]
+#Hmisc::describe(PilotData_general_um)
+#Hmisc::describe(PilotData_general_wu)
+#Hmisc::describe(PilotData_general_br)
+
+# have 5 NA values
+```
+
+##### Age
+```{r warning=F, message=F, error=F, fold.output=FALSE, fold.plot=FALSE}
+max_min_mean_sqrt = function(data) {
+  return (c(max(data, na.rm=TRUE), 
+            min(data, na.rm=TRUE), 
+            mean(data, na.rm=TRUE),
+            sqrt(var(data, na.rm=TRUE))))
+}
+
+rownames_numeric_table_1 = c(
+  "Full cohort (max)",
+  "Full cohort (min)",
+  "Full cohort (mean)",
+  "Full cohort (std)",
+  "Full cohort patients",
+  "UM (max)",
+  "UM (min)",
+  "UM (mean)",
+  "UM (std)",
+  "UM patients",
+  "WU (max)",
+  "WU (min)",
+  "WU (mean)",
+  "WU (std)",
+  "WU patients",
+  "Brown (max)",
+  "Brown (min)",
+  "Brown (mean)",
+  "Brown (std)",
+  "Brown patients",
+  "P-value (Kruskal-Wallis)")
+
+table = data.frame(matrix("", ncol=0, nrow=21))
+col = c(max_min_mean_sqrt(PilotData_general$age),
+        as.character(dim(PilotData_general)[1]),
+        max_min_mean_sqrt(PilotData_general_um$age), 
+        dim(PilotData_general_um)[1],
+        max_min_mean_sqrt(PilotData_general_wu$age), 
+        dim(PilotData_general_wu)[1],
+        max_min_mean_sqrt(PilotData_general_br$age), 
+        dim(PilotData_general_br)[1],
+        kruskal.test(PilotData_general$age ~
+                       PilotData_general$redcap_data_access_group)$p.value)
+table = cbind(table, format(col, scientific=FALSE))
+
+rownames(table) = rownames_numeric_table_1
+colnames(table) = c("Age")
+
+paged_table(table, options=list(rows.print=dim(table)[1]))
+
+```
+
+##### AMA (Age>=35 at delivery)
+```{r warning=F, message=T, error=F, fold.output=FALSE, fold.plot=FALSE}
+cat("Full cohort\n",
+    sum(PilotData_general$AMA==1) - sum((is.na(PilotData_general$AMA))), "out of", dim(PilotData_general)[1],
+    "\n\nUM\n",
+    sum(PilotData_general_um$AMA==1) - sum((is.na(PilotData_general_um$AMA))), "out of", dim(PilotData_general_um)[1],
+    "\n\nWU\n",
+    sum(PilotData_general_wu$AMA==1) - sum((is.na(PilotData_general_wu$AMA))), "out of", dim(PilotData_general_wu)[1],
+     "\n\nBrown\n",
+    sum(PilotData_general_br$AMA==1) - sum((is.na(PilotData_general_br$AMA))), "out of", dim(PilotData_general_br)[1])
+
+chisq.test(PilotData_general$AMA, PilotData_general$redcap_data_access_group, correct=FALSE)
+```
+
+##### BMI at pregnancy start
+```{r warning=F, message=F, error=F, fold.output=FALSE, fold.plot=FALSE}
+
+table = data.frame(matrix("", ncol=0, nrow=21))
+col = c(max_min_mean_sqrt(PilotData_general$bmi_1st_visit),
+        as.character(dim(PilotData_general)[1]),
+        max_min_mean_sqrt(PilotData_general_um$bmi_1st_visit), 
+        dim(PilotData_general_um)[1],
+        max_min_mean_sqrt(PilotData_general_wu$bmi_1st_visit), 
+        dim(PilotData_general_wu)[1],
+        max_min_mean_sqrt(PilotData_general_br$bmi_1st_visit), 
+        dim(PilotData_general_br)[1],
+        kruskal.test(PilotData_general$bmi_1st_visit ~
+                       PilotData_general$redcap_data_access_group)$p.value)
+
+table = cbind(table, col)
+
+rownames(table) = rownames_numeric_table_1
+colnames(table) = c("BMI at pregnancy start")
+
+paged_table(table, options=list(rows.print=dim(table)[1]))
+
+```
+
+##### Parity
+```{r warning=F, message=T, error=F, fold.output=FALSE, fold.plot=FALSE}
+table_1a_categorical = function(name_full, table, table_1a) {
+  row = data.frame(matrix("", ncol=length(name_full), nrow=1))
+  colnames(row) = name_full
+  for (name in names(table)) {
+    row[name_full == name] = table[name]
+  }
+  table_1a = rbind(table_1a, row)
+  return(table_1a)
+}
+
+rownames_categorical_table_1 = c(paste("Full cohort - ", as.character(dim(PilotData_general)[1]), sep=""),
+                                  paste("UM - ", as.character(dim(PilotData_general_um)[1]), sep=""),
+                                  paste("WU - ", as.character(dim(PilotData_general_wu)[1]), sep=""),
+                                  paste("Brown - ", as.character(dim(PilotData_general_br)[1]), sep=""))
+
+name_full = names(table(PilotData_general$Parity))
+table_1a = data.frame(matrix("", ncol=length(name_full), nrow=0))
+table_1a = rbind(table_1a, table(PilotData_general$Parity))
+colnames(table_1a) = name_full
+
+table_1a = table_1a_categorical(name_full, 
+                                table(PilotData_general_um$Parity),
+                                table_1a)
+table_1a = table_1a_categorical(name_full, 
+                                table(PilotData_general_wu$Parity),
+                                table_1a)
+table_1a = table_1a_categorical(name_full, 
+                                table(PilotData_general_br$Parity),
+                                table_1a)
+rownames(table_1a) = rownames_categorical_table_1
+paged_table(table_1a)
+
+chisq.test(PilotData_general$Parity, PilotData_general$redcap_data_access_group, correct=FALSE)
+```
+
+
+##### Nulliparity
+
+```{r warning=F, message=T, error=F, fold.output=FALSE, fold.plot=FALSE}
+
+name_full = names(table(PilotData_general$Nulliparity))
+table_1a = data.frame(matrix("", ncol=length(name_full), nrow=0))
+table_1a = rbind(table_1a, table(PilotData_general$Nulliparity))
+colnames(table_1a) = name_full
+
+table_1a = table_1a_categorical(name_full, 
+                                table(PilotData_general_um$Nulliparity),
+                                table_1a)
+table_1a = table_1a_categorical(name_full, 
+                                table(PilotData_general_wu$Nulliparity),
+                                table_1a)
+table_1a = table_1a_categorical(name_full, 
+                                table(PilotData_general_br$Nulliparity),
+                                table_1a)
+rownames(table_1a) = rownames_categorical_table_1
+paged_table(table_1a)
+
+chisq.test(PilotData_general$Nulliparity, PilotData_general$redcap_data_access_group, correct=FALSE)
+```
+
+##### Prior preterm birth (any)
+
+```{r warning=F, message=T, error=F, fold.output=FALSE, fold.plot=FALSE}
+
+name_full = names(table(PilotData_general$prior_preterm))
+table_1a = data.frame(matrix("", ncol=length(name_full), nrow=0))
+table_1a = rbind(table_1a, table(PilotData_general$prior_preterm))
+colnames(table_1a) = name_full
+
+table_1a = table_1a_categorical(name_full, 
+                                table(PilotData_general_um$prior_preterm),
+                                table_1a)
+table_1a = table_1a_categorical(name_full, 
+                                table(PilotData_general_wu$prior_preterm),
+                                table_1a)
+table_1a = table_1a_categorical(name_full, 
+                                table(PilotData_general_br$prior_preterm),
+                                table_1a)
+rownames(table_1a) = rownames_categorical_table_1
+paged_table(table_1a)
+
+chisq.test(PilotData_general$prior_preterm, PilotData_general$redcap_data_access_group, correct=FALSE)
+```
+
+
+##### Number prior PTB 
+
+```{r warning=F, message=T, error=F, fold.output=FALSE, fold.plot=FALSE}
+
+name_full = names(table(PilotData_general$ptb_20_36_weeks))
+table_1a = data.frame(matrix("", ncol=length(name_full), nrow=0))
+table_1a = rbind(table_1a, table(PilotData_general$ptb_20_36_weeks))
+colnames(table_1a) = name_full
+
+table_1a = table_1a_categorical(name_full, 
+                                table(PilotData_general_um$ptb_20_36_weeks),
+                                table_1a)
+table_1a = table_1a_categorical(name_full, 
+                                table(PilotData_general_wu$ptb_20_36_weeks),
+                                table_1a)
+table_1a = table_1a_categorical(name_full, 
+                                table(PilotData_general_br$ptb_20_36_weeks),
+                                table_1a)
+rownames(table_1a) = rownames_categorical_table_1
+paged_table(table_1a)
+
+chisq.test(PilotData_general$ptb_20_36_weeks, PilotData_general$redcap_data_access_group, correct=FALSE)
+```
+
+
+##### Race
+
+```{r warning=F, message=T, error=F, fold.output=FALSE, fold.plot=FALSE}
+name_full = names(table(PilotData_general$race))
+table_1a = data.frame(matrix("", ncol=length(name_full), nrow=0))
+table_1a = rbind(table_1a, table(PilotData_general$race))
+colnames(table_1a) = name_full
+
+table_1a = table_1a_categorical(name_full, 
+                                table(PilotData_general_um$race),
+                                table_1a)
+table_1a = table_1a_categorical(name_full, 
+                                table(PilotData_general_wu$race),
+                                table_1a)
+table_1a = table_1a_categorical(name_full, 
+                                table(PilotData_general_br$race),
+                                table_1a)
+colnames(table_1a) = c("White", 
+                       "African American or Black", 
+                       #"American Indian or Alaska Native", 
+                       "Asian", 
+                       #"Native Hawaiian or Other Pacific Islander", 
+                       "Hispanic or Latino", 
+                       "Unknown/Decline to Answer", 
+                       "Other")
+rownames(table_1a) = rownames_categorical_table_1
+paged_table(table_1a)
+
+chisq.test(PilotData_general$race, 
+           PilotData_general$redcap_data_access_group, 
+           correct=FALSE)
+```
+
+
+
+
+##### Interval (years) since prior pregnancy 20+ weeks 
+
+```{r warning=F, message=T, error=F, fold.output=FALSE, fold.plot=FALSE}
+
+table = data.frame(matrix("", ncol=0, nrow=21))
+col = c(max_min_mean_sqrt(PilotData_general$interval),
+        as.character(dim(PilotData_general)[1]),
+        max_min_mean_sqrt(PilotData_general_um$interval), 
+        dim(PilotData_general_um)[1],
+        max_min_mean_sqrt(PilotData_general_wu$interval), 
+        dim(PilotData_general_wu)[1],
+        max_min_mean_sqrt(PilotData_general_br$interval), 
+        dim(PilotData_general_br)[1],
+        kruskal.test(PilotData_general$interval ~
+                       PilotData_general$redcap_data_access_group)$p.value)
+
+table = cbind(table, col)
+
+rownames(table) = rownames_numeric_table_1
+colnames(table) = c("Interval (years) since prior pregnancy 20+ weeks")
+
+paged_table(table, options=list(rows.print=dim(table)[1]))
+```
+
+
+##### GA of delivery 
+The unit is in days.
+```{r warning=F, message=F, error=F, fold.output=FALSE, fold.plot=FALSE}
+
+table = data.frame(matrix("", ncol=0, nrow=21))
+col = c(max_min_mean_sqrt(PilotData_general$ga_delivery),
+        as.character(dim(PilotData_general)[1]),
+        max_min_mean_sqrt(PilotData_general_um$ga_delivery), 
+        dim(PilotData_general_um)[1],
+        max_min_mean_sqrt(PilotData_general_wu$ga_delivery), 
+        dim(PilotData_general_wu)[1],
+        max_min_mean_sqrt(PilotData_general_br$ga_delivery), 
+        dim(PilotData_general_br)[1],
+        kruskal.test(PilotData_general$ga_delivery ~
+                       PilotData_general$redcap_data_access_group)$p.value)
+
+table = cbind(table, col)
+
+rownames(table) = rownames_numeric_table_1
+colnames(table) = c("GA of delivery")
+
+paged_table(table, options=list(rows.print=dim(table)[1]))
+
+```
+
+##### Preterm Birth <37 weeks 
+
+```{r warning=F, message=T, error=F, fold.output=FALSE, fold.plot=FALSE}
+
+name_full = names(table(PilotData_general$preterm_birth))
+table_1a = data.frame(matrix("", ncol=length(name_full), nrow=0))
+table_1a = rbind(table_1a, table(PilotData_general$preterm_birth))
+colnames(table_1a) = name_full
+
+table_1a = table_1a_categorical(name_full, 
+                                table(PilotData_general_um$preterm_birth),
+                                table_1a)
+table_1a = table_1a_categorical(name_full, 
+                                table(PilotData_general_wu$preterm_birth),
+                                table_1a)
+table_1a = table_1a_categorical(name_full, 
+                                table(PilotData_general_br$preterm_birth),
+                                table_1a)
+rownames(table_1a) = rownames_categorical_table_1
+colnames(table_1a) = c("Yes", "No")
+paged_table(table_1a)
+
+chisq.test(PilotData_general$preterm_birth, PilotData_general$redcap_data_access_group, correct=FALSE)
+```
+
+
+##### Spontaneous PTB <37 weeks
+
+```{r warning=F, message=T, error=F, fold.output=FALSE, fold.plot=FALSE}
+rownames_categorical_table_1 = c(paste("Full cohort - ", as.character(dim(PilotData_general)[1]), sep=""),
+                                  paste("UM - ", as.character(dim(PilotData_general_um)[1]), sep=""),
+                                  paste("WU - ", as.character(dim(PilotData_general_wu)[1]), sep=""),
+                                  paste("Brown - ", as.character(dim(PilotData_general_br)[1]), sep=""))
+
+name_full = names(table(PilotData_general$sptb))
+table_1a = data.frame(matrix("", ncol=length(name_full), nrow=0))
+table_1a = rbind(table_1a, table(PilotData_general$sptb))
+colnames(table_1a) = name_full
+
+table_1a = table_1a_categorical(name_full, 
+                                table(PilotData_general_um$sptb),
+                                table_1a)
+table_1a = table_1a_categorical(name_full, 
+                                table(PilotData_general_wu$sptb),
+                                table_1a)
+table_1a = table_1a_categorical(name_full, 
+                                table(PilotData_general_br$sptb),
+                                table_1a)
+rownames(table_1a) = rownames_categorical_table_1
+colnames(table_1a) = c("Yes", "No")
+paged_table(table_1a)
+
+#chisq.test(PilotData_general$preterm_birth, PilotData_general$redcap_data_access_group, correct=FALSE)$p.value
+chisq.test(PilotData_general$sptb, 
+           PilotData_general$redcap_data_access_group, 
+           correct=FALSE)
+```
+
+
+
+
+### Table 1a: Baseline demographic characteristics in Aim 1 patients who delivered preterm versus term (ALL SITES) 
+
+We split the dataset according to the patients who delivered preterm and term and output the decriptive statistics for these datasets.
+
+```{r warning=F, message=F, error=F} 
+PilotData_general_new = PilotData_general[!is.na(PilotData_general$preterm_birth),]
+PilotData_general_term = PilotData_general_new[
+  PilotData_general_new$preterm_birth == 2, ]
+PilotData_general_preterm = PilotData_general_new[
+  PilotData_general_new$preterm_birth == 1, ]
+
+# Hmisc::describe(PilotData_general_term)
+# Hmisc::describe(PilotData_general_preterm)
+```
+
+##### Age
+```{r warning=F, message=F, error=F, fold.output=FALSE, fold.plot=FALSE}
+rownames_numeric_table_1a = c(
+  "Term Birth (max)",
+  "Term Birth (min)",
+  "Term Birth (mean)",
+  "Term Birth (std)",
+  "Term Birth patients",
+  "Preterm Birth (max)",
+  "Preterm Birth (min)",
+  "Preterm Birth (mean)",
+  "Preterm Birth (std)",
+  "Preterm Birth patients",
+  "P-value")
+table = data.frame(matrix("", nrow=11, ncol=0))
+col = c(max_min_mean_sqrt(PilotData_general_term$age),
+        as.character(dim(PilotData_general_term)[1]),
+        max_min_mean_sqrt(PilotData_general_preterm$age),
+        dim(PilotData_general_preterm)[1],
+        kruskal.test(PilotData_general$age ~ 
+                       PilotData_general$preterm_birth)$p.value)
+table = cbind(table, col)
+
+rownames(table) = rownames_numeric_table_1a
+colnames(table) = c("Age")
+paged_table(table)
+
+```
+
+
+
+##### AMA (Age>=35 at delivery)
+```{r warning=F, message=T, error=F, fold.output=FALSE, fold.plot=FALSE}
+cat("Term Birth\n",
+    nrow(PilotData_general_term[PilotData_general_term$AMA == 1, ]) - sum((is.na(PilotData_general_term$AMA))), "out of", dim(PilotData_general_term)[1],
+    "\n\nPreterm Birth\n",
+    nrow(PilotData_general_preterm[PilotData_general_preterm$AMA == 1, ]) - sum((is.na(PilotData_general_preterm$AMA))),"out of", dim(PilotData_general_preterm)[1])
+
+chisq.test(PilotData_general$AMA, PilotData_general$preterm_birth, correct=FALSE)
+```
+
+
+##### BMI at pregnancy start
+```{r warning=F, message=F, error=F, fold.output=FALSE, fold.plot=FALSE}
+
+table = data.frame(matrix("", nrow=11, ncol=0))
+col = c(max_min_mean_sqrt(PilotData_general_term$bmi_1st_visit),
+        as.character(dim(PilotData_general_term)[1]),
+        max_min_mean_sqrt(PilotData_general_preterm$bmi_1st_visit),
+        dim(PilotData_general_preterm)[1],
+        kruskal.test(PilotData_general$bmi_1st_visit ~ 
+                       PilotData_general$preterm_birth)$p.value)
+table = cbind(table, col)
+
+rownames(table) = rownames_numeric_table_1a
+colnames(table) = c("BMI at pregnancy start")
+paged_table(table)
+
+```
+
+
+##### Parity
+```{r warning=F, message=T, error=F, fold.output=FALSE, fold.plot=FALSE}
+rownames_categorical_table_1a = c(paste("Term Birth - ", as.character(dim(PilotData_general_term)[1]), sep=""), paste("Preterm Birth - ", as.character(dim(PilotData_general_preterm)[1]), sep=""))
+# name_full = sort(union(names(table(PilotData_general_term$Parity)), 
+#       names(table(PilotData_general_preterm$Parity))))
+name_full = names(table(PilotData_general$Parity))
+table_1b = data.frame(matrix("", ncol=length(name_full), nrow=0))
+colnames(table_1b) = name_full
+
+table_1b = table_1a_categorical(
+  name_full, 
+  table(PilotData_general_term$Parity),
+  table_1b)
+table_1b = table_1a_categorical(
+  name_full, 
+  table(PilotData_general_preterm$Parity),
+  table_1b)
+rownames(table_1b) = rownames_categorical_table_1a
+
+paged_table(table_1b)
+
+chisq.test(PilotData_general$Parity, PilotData_general$preterm_birth, correct=FALSE)
+
+``` 
+
+
+##### Nulliparity
+```{r warning=F, message=T, error=F, fold.output=FALSE, fold.plot=FALSE}
+
+rownames_categorical_table_1a = c(paste("Term Birth - ", as.character(dim(PilotData_general_term)[1]), sep=""), paste("Preterm Birth - ", as.character(dim(PilotData_general_preterm)[1]), sep=""))
+# name_full = sort(union(names(table(PilotData_general_term$Parity)), 
+#       names(table(PilotData_general_preterm$Parity))))
+
+name_full = names(table(PilotData_general$Nulliparity))
+table_1b = data.frame(matrix("", ncol=length(name_full), nrow=0))
+colnames(table_1b) = name_full
+
+table_1b = table_1a_categorical(
+  name_full, 
+  table(PilotData_general_term$Nulliparity),
+  table_1b)
+table_1b = table_1a_categorical(
+  name_full, 
+  table(PilotData_general_preterm$Nulliparity),
+  table_1b)
+rownames(table_1b) = rownames_categorical_table_1a
+
+paged_table(table_1b)
+
+chisq.test(PilotData_general$Nulliparity, PilotData_general$preterm_birth, correct=FALSE)
+
+```
+
+##### Prior preterm birth (any) 
+```{r warning=F, message=T, error=F, fold.output=FALSE, fold.plot=FALSE}
+
+rownames_categorical_table_1a = c(paste("Term Birth - ", as.character(dim(PilotData_general_term)[1]), sep=""), paste("Preterm Birth - ", as.character(dim(PilotData_general_preterm)[1]), sep=""))
+# name_full = sort(union(names(table(PilotData_general_term$Parity)), 
+#       names(table(PilotData_general_preterm$Parity))))
+
+name_full = names(table(PilotData_general$prior_preterm))
+table_1b = data.frame(matrix("", ncol=length(name_full), nrow=0))
+colnames(table_1b) = name_full
+
+table_1b = table_1a_categorical(
+  name_full, 
+  table(PilotData_general_term$prior_preterm),
+  table_1b)
+table_1b = table_1a_categorical(
+  name_full, 
+  table(PilotData_general_preterm$prior_preterm),
+  table_1b)
+rownames(table_1b) = rownames_categorical_table_1a
+
+paged_table(table_1b)
+
+chisq.test(PilotData_general$prior_preterm, PilotData_general$preterm_birth, correct=FALSE)
+
+```
+
+##### Number prior PTB 
+
+```{r warning=F, message=T, error=F, fold.output=FALSE, fold.plot=FALSE}
+
+name_full = sort(union(names(table(PilotData_general_term$ptb_20_36_weeks)), 
+      names(table(PilotData_general_preterm$ptb_20_36_weeks))))
+table_1b = data.frame(matrix("", ncol=length(name_full), nrow=0))
+colnames(table_1b) = name_full
+
+table_1b = table_1a_categorical(
+  name_full, 
+  table(PilotData_general_term$ptb_20_36_weeks),
+  table_1b)
+table_1b = table_1a_categorical(
+  name_full, 
+  table(PilotData_general_preterm$ptb_20_36_weeks),
+  table_1b)
+rownames(table_1b) = rownames_categorical_table_1a
+
+paged_table(table_1b)
+
+chisq.test(PilotData_general$ptb_20_36_weeks, PilotData_general$preterm_birth, correct=FALSE)
+
+```
+
+##### Race
+```{r warning=F, message=T, error=F, fold.output=FALSE, fold.plot=FALSE}
+name_full = sort(union(names(table(PilotData_general_term$race)), 
+      names(table(PilotData_general_preterm$race))))
+table_1b = data.frame(matrix("", ncol=length(name_full), nrow=0))
+colnames(table_1b) = name_full
+
+table_1b = table_1a_categorical(
+  name_full, 
+  table(PilotData_general_term$race),
+  table_1b)
+table_1b = table_1a_categorical(
+  name_full, 
+  table(PilotData_general_preterm$race),
+  table_1b)
+colnames(table_1b) = c("White", 
+                       "African American or Black", 
+                       #"American Indian or Alaska Native", 
+                       "Asian", 
+                       #"Native Hawaiian or Other Pacific Islander", 
+                       "Hispanic or Latino", 
+                       #"Unknown/Decline to Answer", 
+                       "Other")
+rownames(table_1b) = rownames_categorical_table_1a
+
+paged_table(table_1b)
+
+chisq.test(PilotData_general$race, PilotData_general$preterm_birth, correct=FALSE)
+
+```
+
+
+
+##### Interval (years) since prior pregnancy 20+ weeks 
+
+```{r warning=F, message=F, error=F, fold.output=FALSE, fold.plot=FALSE}
+table = data.frame(matrix("", nrow=11, ncol=0))
+row = c(max_min_mean_sqrt(PilotData_general_term$interval),
+        as.character(dim(PilotData_general_term)[1]),
+        max_min_mean_sqrt(PilotData_general_preterm$interval),
+        as.character(dim(PilotData_general_preterm)[1]),
+        kruskal.test(PilotData_general$interval ~
+                       PilotData_general$preterm_birth)$p.value)
+table = cbind(table, row)
+
+rownames(table) = rownames_numeric_table_1a
+colnames(table) = c("Interval (years) since prior pregnancy 20+ weeks")
+
+paged_table(table, options=list(rows.print=dim(table)[1]))
+```
+
+##### GA of delivery 
+
+```{r warning=F, message=F, error=F, fold.output=FALSE, fold.plot=FALSE}
+table = data.frame(matrix("", nrow=11, ncol=0))
+row = c(max_min_mean_sqrt(PilotData_general_term$ga_delivery),
+        as.character(dim(PilotData_general_term)[1]),
+        max_min_mean_sqrt(PilotData_general_preterm$ga_delivery),
+        as.character(dim(PilotData_general_preterm)[1]),
+        kruskal.test(PilotData_general$ga_delivery ~
+                       PilotData_general$preterm_birth)$p.value)
+table = cbind(table, row)
+
+rownames(table) = rownames_numeric_table_1a
+colnames(table) = c("GA of delivery")
+
+paged_table(table, options=list(rows.print=dim(table)[1]))
+```
+
+
+
+
+
+### Table 2: Cervical characteristics in Aim 1 patients by delivery timing / Combined figure–box plot? 
+
+We divide the dataset into two parts, general data and visit data, by `redcap_event_name` and extract some desired columns. And we did some data process and cleaning.
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+ym = read.csv("logYM_Updated.csv", stringsAsFactors=TRUE) %>%
+  distinct(record_id, pvisit, .keep_all=TRUE)
+
+data_info = data[data$redcap_event_name == "general_arm_1", 
+                 c("record_id",
+                   "a1_consented",
+                   "preterm_birth",
+                   "sptb",
+                   "term",
+                   "preterm",
+                   "prior_vaginal_deliveries",
+                   "number_prior_cs")]
+data_info = data_info[data_info$a1_consented == 1, ]
+data_info$preterm_birth = as.character(data_info$preterm_birth)
+data_info$preterm_birth[data_info$preterm_birth == "1"] = "preterm"
+data_info$preterm_birth[data_info$preterm_birth == "2"] = "term"
+data_info$preterm_birth[data_info$preterm_birth != "preterm" &
+                          data_info$preterm_birth != "term"] = NA
+data_info$preterm_birth = as.factor(data_info$preterm_birth)
+
+data_info$sptb = as.character(data_info$sptb)
+data_info$sptb[data_info$sptb == "1"] = "sptb"
+data_info$sptb[data_info$sptb == "2"] = "iptb"
+data_info$sptb[data_info$sptb != "sptb" & data_info$sptb != "iptb"] = NA
+data_info$sptb = as.factor(data_info$sptb)
+
+data_info$term = as.numeric(as.character(data_info$term))
+data_info$preterm = as.numeric(as.character(data_info$preterm))
+
+data_info$nulliparous = NA
+data_info$nulliparous[
+  (data_info$term + data_info$preterm) == 0] = "nulliparous"
+data_info$nulliparous[
+  (data_info$term + data_info$preterm) > 0] = "multiparous"
+data_info$nulliparous = as.factor(data_info$nulliparous)
+
+data_info$prior_vaginal_deliveries = as.character(as.numeric(
+  as.character(data_info$prior_vaginal_deliveries)))
+data_info$prior_vaginal_deliveries[
+  data_info$prior_vaginal_deliveries != "1"] = "2/2+"
+data_info$prior_vaginal_deliveries = as.factor(
+  data_info$prior_vaginal_deliveries)
+
+data_info$number_prior_cs = as.character(as.numeric(
+  as.character(data_info$number_prior_cs)))
+data_info$number_prior_cs[data_info$number_prior_cs != "1"] = "2/2+"
+data_info$number_prior_cs = as.factor(data_info$number_prior_cs)
+  
+data_cl = data[data$redcap_event_name != "general_arm_1", 
+               c("record_id", 
+                 "redcap_event_name", 
+                 "cl_v1", 
+                 "ga_wks_a1", 
+                 "ga_days_a1")]
+
+data_cl$redcap_event_name = as.factor(data_cl$redcap_event_name)
+
+data_cl$cl_v1 = as.numeric(as.character(data_cl$cl_v1))
+data_cl$cl_v1[data_cl$cl_v1==-99] = NA
+
+data_cl$ga_wks_a1 = as.numeric(as.character(data_cl$ga_wks_a1))
+data_cl$ga_days_a1 = as.numeric(as.character(data_cl$ga_days_a1))
+data_cl$ga = 7 * data_cl$ga_wks_a1 + data_cl$ga_days_a1
+data_cl = left_join(data_cl, ym, 
+                    by=c("record_id" = "record_id", "ga" = "pvisit"))
+```
+
+Next, we join the general data and the visit data by `record_id` and output the descriptive statistics of the joined dataset.
+
+```{r message=FALSE, warning=FALSE}
+data_cl = inner_join(data_cl, data_info, by="record_id")
+data_cl_df = dcast(
+  data_cl[c("record_id", "redcap_event_name", "cl_v1")], 
+  record_id ~ redcap_event_name)
+colnames(data_cl_df)[2:4] = c("cl_1", "cl_2", "cl_3")
+data_cl_df = inner_join(
+  data_cl_df, 
+  dcast(data_cl[c("record_id", "redcap_event_name", "ga")], 
+        record_id ~ redcap_event_name),
+  by="record_id")
+colnames(data_cl_df)[5:7] = c("ga_1", "ga_2", "ga_3")
+data_cl_df = inner_join(
+  data_cl_df, 
+  dcast(data_cl[c("record_id", "redcap_event_name", "PredYM")], 
+        record_id ~ redcap_event_name),
+  by="record_id")
+colnames(data_cl_df)[8:10] = c("logYM_1", "logYM_2", "logYM_3")
+data_cl_df$CLFD_1 = (data_cl_df$cl_1 - data_cl_df$cl_2) / data_cl_df$cl_1
+data_cl_df$CLFD_2 = (data_cl_df$cl_2 - data_cl_df$cl_3) / data_cl_df$cl_2
+data_cl_df$avg_cl1_cl2 = (data_cl_df$cl_1 + data_cl_df$cl_2) / 2
+data_cl_df$avg_cl2_cl3 = (data_cl_df$cl_2 + data_cl_df$cl_3) / 2
+data_cl_df$df_cl1_cl2 = data_cl_df$cl_2 - data_cl_df$cl_1
+data_cl_df$df_cl2_cl3 = data_cl_df$cl_3 - data_cl_df$cl_2
+data_cl_df$df_ga1_ga2 = data_cl_df$ga_2 - data_cl_df$ga_1
+data_cl_df$df_ga2_ga3 = data_cl_df$ga_3 - data_cl_df$ga_2
+data_cl_df$YMFD_1 = (data_cl_df$logYM_1 - data_cl_df$logYM_2) /
+  data_cl_df$logYM_1
+data_cl_df$YMFD_2 = (data_cl_df$logYM_2 - data_cl_df$logYM_3) / 
+  data_cl_df$logYM_2
+data_cl_df$avg_ym1_ym2 = (data_cl_df$logYM_1 + data_cl_df$logYM_2) / 2
+data_cl_df$avg_ym2_ym3 = (data_cl_df$logYM_2 + data_cl_df$logYM_3) / 2
+data_cl_df$df_ym1_ym2 = data_cl_df$logYM_2 - data_cl_df$logYM_1
+data_cl_df$df_ym2_ym3 = data_cl_df$logYM_3 - data_cl_df$logYM_2
+data_cl_df = inner_join(data_cl_df, data_info, by="record_id")
+
+# Hmisc::describe(data_cl)
+```
+
+```{r}
+data_cl$record_id = factor(
+  data_cl$record_id, 
+  levels=unique(data_cl$record_id)[
+    order(data_cl_df$preterm_birth,
+          -apply(data_cl_df[c("cl_1", "cl_2", "cl_3")], 1, mean, na.rm=TRUE), 
+          decreasing=TRUE)])
+plot_ly(data_cl, 
+        x=~ga[data_cl$preterm_birth == "preterm"], 
+        y=~as.numeric(record_id[data_cl$preterm_birth == "preterm"]), 
+        z=~cl_v1[data_cl$preterm_birth == "preterm"], 
+        type="scatter3d", 
+        mode="lines+markers", 
+        connectgaps=TRUE,
+        #name=~paste0("preterm"),
+        color=~record_id[data_cl$preterm_birth == "preterm"],
+        line=list(width=2, color="#66c2a5"),
+        marker=list(size=3, color="#66c2a5")) %>%
+  add_trace(
+    x=~ga[data_cl$preterm_birth == "term"], 
+    y=~as.numeric(record_id[data_cl$preterm_birth == "term"]), 
+    z=~cl_v1[data_cl$preterm_birth == "term"], 
+    type="scatter3d", 
+    mode="lines+markers", 
+    connectgaps=TRUE,
+    #name=~paste0("term"),
+    color=~record_id[data_cl$preterm_birth == "term"],
+    line=list(width=2, color="#8da0cb"),
+    marker=list(size=3, color="#8da0cb")) %>%
+  layout(
+    title="", 
+    scene=list(xaxis=list(title="ga"),
+               yaxis=list(title="", showticklabels=FALSE),
+               zaxis=list(title="cl")))
+```
+
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+table = data.frame(matrix("", nrow=18, ncol=0))
+
+for (i in c(1:3)) {
+  cl_visit = data_cl[
+    data_cl$redcap_event_name == paste0("visit_", i, "_arm_1"), ]
+  term_cl = cl_visit$cl_v1[cl_visit$preterm_birth == "term"]
+  preterm_cl = cl_visit$cl_v1[cl_visit$preterm_birth == "preterm"]
+  sptb_cl = cl_visit$cl_v1[cl_visit$sptb == "sptb"]
+  iptb_cl = cl_visit$cl_v1[cl_visit$sptb == "iptb"]
+  col = c(max_min_mean_sqrt(term_cl),
+          max_min_mean_sqrt(preterm_cl),
+          kruskal.test(cl_v1 ~ preterm_birth, data=cl_visit)$p.value,
+          max_min_mean_sqrt(sptb_cl),
+          max_min_mean_sqrt(iptb_cl),
+          kruskal.test(cl_v1 ~ sptb, data=cl_visit)$p.value)
+  table = cbind(table, col)
+}
+
+rownames(table) = c(
+  "Term birth (delivery 37.0 - 41.6) *REF* (max)",
+  "Term birth (delivery 37.0 - 41.6) *REF* (min)",
+  "Term birth (delivery 37.0 - 41.6) *REF* (mean)",
+  "Term birth (delivery 37.0 - 41.6) *REF* (std)",
+  "Preterm birth (delivery < 37 weels) ALL (max)",
+  "Preterm birth (delivery < 37 weels) ALL (min)",
+  "Preterm birth (delivery < 37 weels) ALL (mean)",
+  "Preterm birth (delivery < 37 weels) ALL (std)",
+  "P value (Term vs Preterm)",
+  "Spontaneous PTB (<37 weeks) (max)",
+  "Spontaneous PTB (<37 weeks) (min)",
+  "Spontaneous PTB (<37 weeks) (mean)",
+  "Spontaneous PTB (<37 weeks) (std)",
+  "Induced PTB (max)",
+  "Induced PTB (min)",
+  "Induced PTB (mean)",
+  "Induced PTB (std)",
+  "P value (SPTB vs IPTB)")
+colnames(table) = c("CL early", "CL mid", "CL late")
+paged_table(table, options=list(rows.print=dim(table)[1]))
+```
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+table = data.frame(matrix("", nrow=18, ncol=0))
+
+for (i in c(1:3)) {
+  cl_visit = data_cl[
+    data_cl$redcap_event_name == paste0("visit_", i, "_arm_1"), ]
+  term_cl = cl_visit$PredYM[cl_visit$preterm_birth == "term"]
+  preterm_cl = cl_visit$PredYM[cl_visit$preterm_birth == "preterm"]
+  sptb_cl = cl_visit$PredYM[cl_visit$sptb == "sptb"]
+  iptb_cl = cl_visit$PredYM[cl_visit$sptb == "iptb"]
+  col = c(max_min_mean_sqrt(term_cl),
+          max_min_mean_sqrt(preterm_cl),
+          kruskal.test(PredYM ~ preterm_birth, data=cl_visit)$p.value,
+          max_min_mean_sqrt(sptb_cl),
+          max_min_mean_sqrt(iptb_cl),
+          kruskal.test(PredYM ~ sptb, data=cl_visit)$p.value)
+  table = cbind(table, col)
+}
+
+rownames(table) = c(
+  "Term birth (delivery 37.0 - 41.6) *REF* (max)",
+  "Term birth (delivery 37.0 - 41.6) *REF* (min)",
+  "Term birth (delivery 37.0 - 41.6) *REF* (mean)",
+  "Term birth (delivery 37.0 - 41.6) *REF* (std)",
+  "Preterm birth (delivery < 37 weels) ALL (max)",
+  "Preterm birth (delivery < 37 weels) ALL (min)",
+  "Preterm birth (delivery < 37 weels) ALL (mean)",
+  "Preterm birth (delivery < 37 weels) ALL (std)",
+  "P value (Term vs Preterm)",
+  "Spontaneous PTB (<37 weeks) (max)",
+  "Spontaneous PTB (<37 weeks) (min)",
+  "Spontaneous PTB (<37 weeks) (mean)",
+  "Spontaneous PTB (<37 weeks) (std)",
+  "Induced PTB (max)",
+  "Induced PTB (min)",
+  "Induced PTB (mean)",
+  "Induced PTB (std)",
+  "P value (SPTB vs IPTB)")
+colnames(table) = c("logYM early", "logYM mid", "logYM late")
+paged_table(table, options=list(rows.print=dim(table)[1]))
+```
+
+#### Preterm vs Term
+
+Also, to show the rate for CL shortening, we fit a `glm(CL ~ visit)` model with `family=gaussian()`. The rate for CL shortening is indicated by the coefficients of visit 2 and visit 3, and the p-value's are indicated by the corresponding p-value's for the coefficient.
+
+Rate for CL shortening for Preterm birth (delivery < 37 weels) ALL
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+glm_preterm = glm(cl_v1 ~ redcap_event_name, 
+          data_cl[data_cl$preterm_birth == "preterm", ], 
+          family=gaussian())
+summary(glm_preterm)
+```
+
+polynomial fit of cervical length vs GA - Preterm Birth
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+lm_preterm_2 = lm(cl_v1 ~ ga + I(ga^2), 
+                data_cl[data_cl$preterm_birth == "preterm", ])
+summary(lm_preterm_2)
+lm_preterm_3 = lm(cl_v1 ~ ga + I(ga^2) + I(ga^3), 
+                data_cl[data_cl$preterm_birth == "preterm", ])
+#summary(lm_preterm_3)
+
+anova(lm_preterm_3)
+```
+
+Rate for CL shortening for Term birth (delivery 37.0 - 41.6) *REF*
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+glm_term = glm(cl_v1 ~ redcap_event_name, 
+               data_cl[data_cl$preterm_birth == "term", ], 
+               family=gaussian())
+summary(glm_term)
+```
+
+polynomial fit of cervical length vs GA - Term Birth
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+lm_term_2 = lm(cl_v1 ~ ga + I(ga^2), 
+                data_cl[data_cl$preterm_birth == "term", ])
+summary(lm_term_2)
+lm_term_3 = lm(cl_v1 ~ ga + I(ga^2) + I(ga^3), 
+                data_cl[data_cl$preterm_birth == "term", ])
+summary(lm_term_3)
+
+anova(lm_preterm_3)
+```
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+summary(lm(PredYM ~ ga, data_cl[data_cl$preterm_birth == "preterm", ]))
+summary(lm(PredYM ~ ga, data_cl[data_cl$preterm_birth == "term", ]))
+```
+
+```{r include=TRUE, message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+#plot_ly(data_cl, 
+#        x=~redcap_event_name, 
+#        y=~cl_v1, 
+#        color=~preterm_birth, 
+#        type="box") %>% 
+#  layout(title="Box plot for Term vs Preterm",
+#       boxmode="group")
+
+
+violin_plot = function(data_cl, feature, name1, name2, column) {
+  data_cl$redcap_event_name = as.character(
+    data_cl$redcap_event_name
+    )
+  plot_ly(data_cl, type="violin") %>%
+    add_trace(
+      x=data_cl$redcap_event_name[data_cl[column] == name1],
+      y=data_cl[[feature]][data_cl[column] == name1],
+      legendgroup=name1,
+      scalegroup=name1,
+      name=name1,
+      side="negative",
+      width=1,
+      box=list(visible=TRUE),
+      meanline=list(visible=TRUE)) %>%
+    add_trace(
+      x=data_cl$redcap_event_name[data_cl[column] == name2],
+      y=data_cl[[feature]][data_cl[column] == name2],
+      legendgroup=name2,
+      scalegroup=name2,
+      name=name2,
+      side="positive",
+      width=1,
+      box=list(visible=TRUE),
+      meanline=list(visible=TRUE)) %>%
+    layout(title=paste0(
+      feature, " violin plot for ", name1, " vs ", name2, " (", column, ")"),
+           xaxis=list(title=""),
+           yaxis=list(title=""),
+           violingap=0,
+           violingroupgap=0,
+           violinmode="overlay") %>% 
+    layout(xaxis=list(categoryorder="array",
+                      categoryarray=c("visit_1_arm_1", 
+                                      "visit_2_arm_1", 
+                                      "visit_3_arm_1")))
+}
+
+violin_plot(data_cl, "cl_v1", "term", "preterm", "preterm_birth")
+
+violin_plot(data_cl, "PredYM", "term", "preterm", "preterm_birth")
+
+smoothing = function(data, feature) {
+  predict(loess(data[[feature]]~data$ga, span=1))
+}
+
+smoothing_data = function(data, feature, column, name1, name2) {
+  data = data[!is.na(data[[feature]]) & 
+                !is.na(data$ga) & 
+                !is.na(data[column]), ]
+  data = data[order(data$ga), ]
+  data[[paste0(feature, "_smoothing")]][data[column] == name1] =
+    smoothing(data[data[column] == name1, ], feature)
+  data[[paste0(feature, "_smoothing")]][data[column] == name2] =
+    smoothing(data[data[column] == name2, ], feature)
+  return(data)
+}
+
+cl_density_plot = function(data, visit, column, name1, name2) {
+  cl1 = data$cl_v1[data[column] == name1 &
+                   data$redcap_event_name == 
+                   paste0("visit_", visit, "_arm_1")]
+  cl2 = data$cl_v1[data[column] == name2 &
+                   data$redcap_event_name == 
+                   paste0("visit_", visit, "_arm_1")]
+  plot_ly(
+    x=cl1,
+    type="histogram", 
+    name=paste(name1, "histogram")) %>% 
+    add_trace(
+      x=density(cl1)$x, 
+      y=density(cl1)$y, 
+      type="scatter", 
+      mode="lines", 
+      yaxis="y2", 
+      name=paste(name1, "density")) %>% 
+    add_trace(
+      x=cl2,
+      type="histogram", 
+      name=paste(name2, "histogram"))  %>% 
+    add_trace(
+      x=density(cl2)$x, 
+      y=density(cl2)$y, 
+      type="scatter", 
+      mode="lines", 
+      yaxis="y2", 
+      name=paste(name2, "density")) %>% 
+    layout(title=paste(
+      "Histogram & density plot for", name1, "vs", name2, "at visit", visit), 
+           yaxis2=list(overlaying="y", side="right"),
+           legend=list(orientation="h"))
+}
+
+scatter_plot_smoothing = function(data_cl, feature, name1, name2, column) {
+  data = smoothing_data(
+    data_cl, feature, column, name1, name2)
+  plot_ly(data, 
+          x=data$ga, 
+          y=data[[feature]], 
+          color=data[[column]],
+          alpha=0.5,
+          type="scatter",
+          mode="markers", 
+          name=data[[column]]) %>%
+    add_trace(
+      data,
+      x=data$ga, 
+      y=data[[paste0(feature, "_smoothing")]],
+      alpha=1,
+      mode="lines",
+      name=data[[column]]) %>%
+    layout(
+      title=paste0("Scatter plot and smoothing curve of ", 
+                   feature, 
+                   " vs GA for ",
+                   column))
+}
+
+scatter_plot_smoothing(data_cl, "cl_v1", "term", "preterm", "preterm_birth")
+
+scatter_plot_smoothing(data_cl, "PredYM", "term", "preterm", "preterm_birth")
+
+scatter_plot_3d = function(data_cl_df, feature, column) {
+  plot_ly(data_cl_df, 
+          x=data_cl_df[[paste0(feature, "_1")]], 
+          y=data_cl_df[[paste0(feature, "_2")]], 
+          z=data_cl_df[[paste0(feature, "_3")]], 
+          color=data_cl_df[[column]]) %>% 
+    add_markers() %>% 
+    layout(
+      title=paste0("3D Scatter plot of ", 
+                   feature, 
+                   " at 3 visits for ", column))
+}
+
+scatter_plot_3d(data_cl_df, "cl", "preterm_birth")
+
+scatter_plot_3d(data_cl_df, "logYM", "preterm_birth")
+
+#cl_density_plot(preterm_cl, 1, "preterm_birth", "preterm", "term")
+#cl_density_plot(preterm_cl, 2, "preterm_birth", "preterm", "term")
+#cl_density_plot(preterm_cl, 3, "preterm_birth", "preterm", "term")
+
+marginal_plot = function(name1, name2, column, coord_fixed=TRUE) {
+  data = na.omit(
+    data_cl_df[c(name1, name2, column)])
+  p = ggplot(data,
+    aes(x=unlist(data[name1]), 
+        y=unlist(data[name2]), 
+        color=unlist(data[column]))) +
+    geom_point(alpha=0.6, shape=16) +
+    stat_ellipse(level=0.8) + 
+    geom_smooth(method="lm", fill=NA) +
+    scale_color_brewer(palette="Dark2") +
+    theme_bw() +
+    theme(legend.position="bottom",
+          plot.title=element_textbox_simple()) +
+    labs(x=name1, y=name2)
+  if (coord_fixed) {
+    p = p + coord_fixed()
+  } else {
+    plot = plot + theme(aspect.ratio=1)
+  }
+  return(ggMarginal(p, type="density", groupColour=TRUE, groupFill=TRUE))
+}
+
+contour_plot = function(data_cl_df, name1, name2, column, coord_fixed=TRUE) {
+  data_cl_df = na.omit(data_cl_df[c(name1, name2, column)])
+  plot = ggplot(NULL,aes(
+      x=data_cl_df[[name1]], 
+      y=data_cl_df[[name2]],
+      color=data_cl_df[[column]])) +
+    geom_density_2d() +
+      coord_fixed() +
+      theme_bw()  +
+    theme(legend.position="bottom",
+          plot.title=element_textbox_simple()) +
+    labs(x=name1, y=name2)
+  if (coord_fixed) {
+    plot = plot + coord_fixed()
+  } else {
+    plot = plot + theme(aspect.ratio=1)
+  }
+  return(plot)
+}
+```
+
+
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+# Custom design of Normal-Mixture Model plot
+normalMM.plot <- function(data_no_NA, k = 2, y_max, main = "", arbmean = T, arbva = T) {  # mix.object <- fit_LN[[i]]
+
+  mix.object = normalmixEM(data_no_NA, k = k, verb=F, maxrestarts = 100)
+  # data_no_NA <- crystallography_data[complete.cases(crystallography_data[, i]), i]
+  d3 <- function(x) { # construct the mixture using the estimated parameters
+    mix.object$lambda[1]*dnorm(x, mean=mix.object$mu[1], sd=mix.object$sigma[1]) + 
+      mix.object$lambda[2]*dnorm(x, mean=mix.object$mu[2], sd=mix.object$sigma[2]) +
+      mix.object$lambda[3]*dnorm(x, mean=mix.object$mu[3], sd=mix.object$sigma[3])
+  }
+
+  x <- seq(min(data_no_NA), max(data_no_NA), 0.001)
+  hist(data_no_NA, col="pink", freq=F, breaks = 15, ylim = c(0.0, y_max), main = main, xlab="Intensities")
+  lines(x, d3(x), lwd=3, col="black")
+  mixColors <- colorRampPalette(c("blue", "red"))(k)
+  
+  for (i in 1:k) {
+    d = function(x) { # construct each of the Normal components using the estimated parameters
+      mix.object$lambda[i]*dnorm(x, mean=mix.object$mu[i], sd=mix.object$sigma[i])
+    }
+    lines(x, d(x), lwd=3, col=mixColors[i])
+  }
+}
+
+# plot
+multi_normal.plot <- function(k, feature, column, name1, name2, y_max){
+  var1 = paste0(feature, "_1")
+  var2 = paste0(feature, "_2")
+  var3 = paste0(feature, "_3")
+  par(mfrow=c(3, 2))
+    normalMM.plot(na.omit(data_cl_df[[var1]][data_cl[[column]] == name1]), k, y_max, 
+                paste0("Mixture of ", as.character(k), " Normal Models of ", var1, " (", name1, ")"))
+    normalMM.plot(na.omit(data_cl_df[[var1]][data_cl[[column]] == name2]), k, y_max, 
+                paste0("Mixture of ", as.character(k), " Normal Models of ", var1, " (", name2, ")"))
+    normalMM.plot(na.omit(data_cl_df[[var2]][data_cl[[column]] == name1]), k, y_max, 
+                paste0("Mixture of ", as.character(k), " Normal Models of ", var2, " (", name1, ")"))
+    normalMM.plot(na.omit(data_cl_df[[var2]][data_cl[[column]] == name2]), k, y_max, 
+                paste0("Mixture of ", as.character(k), " Normal Models of ", var2, " (", name2, ")"))
+    normalMM.plot(na.omit(data_cl_df[[var3]][data_cl[[column]] == name1]), k, y_max, 
+                paste0("Mixture of ", as.character(k), " Normal Models of ", var3, " (", name1, ")"))
+    normalMM.plot(na.omit(data_cl_df[[var3]][data_cl[[column]] == name2]), k, y_max, 
+                paste0("Mixture of ", as.character(k), " Normal Models of ", var3, " (", name2, ")"))
+    par(mfrow=c(1, 1))
+}
+```
+
+Multi-Normal Distributions fit for Cervical Length for Different Visit for Term & Preterm
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE, }
+multi_normal.plot(2, "cl", "preterm_birth", "term", "preterm", 0.12)
+```
+Multi-Normal Distributions fit for Cervical Length for Different Visit for Term & Preterm
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+multi_normal.plot(2, "logYM", "preterm_birth", "term", "preterm", 1.3)
+```
+
+Cervical Length Fractional Difference for Term & Preterm
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("CLFD_1", "CLFD_2", "preterm_birth")
+contour_plot(data_cl_df, "CLFD_1", "CLFD_2", "preterm_birth")
+```
+
+Average Cervical Length for Term & Preterm
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("avg_cl1_cl2", "avg_cl2_cl3", "preterm_birth")
+```
+
+CL diff vs GA diff on visit 1 & 2 for Term & Preterm
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("df_ga1_ga2", "df_cl1_cl2", "preterm_birth", coord_fixed=FALSE)
+```
+
+CL diff vs GA diff on visit 2 & 3 for Term & Preterm
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("df_ga2_ga3", "df_cl2_cl3", "preterm_birth", coord_fixed=FALSE)
+```
+
+logYM Fractional Difference for Term & Preterm
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("YMFD_1", "YMFD_2", "preterm_birth")
+```
+
+Average logYM for Term & Preterm
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("avg_ym1_ym2", "avg_ym2_ym3", "preterm_birth")
+```
+
+logYM diff vs GA diff on visit 1 & 2 for Term & Preterm
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("df_ga1_ga2", "df_ym1_ym2", "preterm_birth", coord_fixed=FALSE)
+```
+
+logYM diff vs GA diff on visit 2 & 3 for Term & Preterm
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("df_ga2_ga3", "df_ym2_ym3", "preterm_birth", coord_fixed=FALSE)
+```
+
+#### SPTB vs IPTB
+
+Rate for CL shortening for Spontaneous PTB
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+glm_sptb = glm(cl_v1 ~ redcap_event_name, 
+               data_cl[data_cl$sptb == "sptb", ], 
+               family=gaussian())
+summary(glm_sptb)
+```
+
+polynomial fit of cervical length vs GA - Spontaneous PTB
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+lm_sptb_2 = lm(cl_v1 ~ ga + I(ga^2), 
+                data_cl[data_cl$sptb == "sptb", ],)
+#summary(lm_sptb_2)
+anova(lm_sptb_2)
+
+lm_sptb_3 = lm(cl_v1 ~ ga + I(ga^2) + I(ga^3), 
+                data_cl[data_cl$sptb == "sptb", ],)
+#summary(lm_sptb_3)
+
+anova(lm_sptb_3)
+```
+
+Rate for CL shortening for Induced PTB
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+glm_iptb = glm(cl_v1 ~ redcap_event_name, 
+               data_cl[data_cl$sptb == "iptb", ], 
+               family=gaussian())
+summary(glm_iptb)
+```
+
+polynomial fit of cervical length vs GA - Induced PTB
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+lm_iptb_2 = lm(cl_v1 ~ ga + I(ga^2), 
+                data_cl[data_cl$sptb == "iptb", ],)
+summary(lm_iptb_2)
+lm_iptb_3 = lm(cl_v1 ~ ga + I(ga^2) + I(ga^3), 
+                data_cl[data_cl$sptb == "iptb", ],)
+#summary(lm_iptb_3)
+
+anova(lm_iptb_3)
+```
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+summary(lm(PredYM ~ ga, data_cl[data_cl$sptb == "sptb", ]))
+summary(lm(PredYM ~ ga, data_cl[data_cl$sptb == "iptb", ]))
+```
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+#plot_ly(data_cl, 
+#        x=~redcap_event_name, 
+#        y=~cl_v1, 
+#        color=~sptb, 
+#        type="box") %>% 
+#  layout(title="SPTB vs IPTB",
+#       boxmode="group")
+
+violin_plot(data_cl, "cl_v1", "sptb", "iptb", "sptb")
+
+violin_plot(data_cl, "PredYM", "sptb", "iptb", "sptb")
+
+scatter_plot_smoothing(data_cl, "cl_v1", "sptb", "iptb", "sptb")
+
+scatter_plot_smoothing(data_cl, "PredYM", "sptb", "iptb", "sptb")
+
+scatter_plot_3d(data_cl_df, "cl", "sptb")
+
+scatter_plot_3d(data_cl_df, "logYM", "sptb")
+
+#cl_density_plot(sptb_cl, 1, "sptb", "sptb", "iptb")
+#cl_density_plot(sptb_cl, 2, "sptb", "sptb", "iptb")
+#cl_density_plot(sptb_cl, 3, "sptb", "sptb", "iptb")
+```
+
+Multi-Normal Distributions fit for Cervical Length for Different Visit for sptb & iptb
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+multi_normal.plot(2, "cl", "sptb", "iptb", "sptb", 0.12)
+```
+
+Multi-Normal Distributions fit for Cervical Length for Different Visit for sptb & iptb
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+multi_normal.plot(2, "logYM", "preterm_birth", "term", "preterm", 1.4)
+```
+
+Cervical Length Fractional Difference for sptb & iptb
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("CLFD_1", "CLFD_2", "sptb")
+```
+
+Average Cervical Length for sptb & iptb
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("avg_cl1_cl2", "avg_cl2_cl3", "sptb")
+```
+
+CL diff vs GA diff on visit 1 & 2 for sptb & iptb
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("df_ga1_ga2", "df_cl1_cl2", "sptb", coord_fixed=FALSE)
+```
+
+CL diff vs GA diff on visit 2 & 3 for sptb & iptb
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("df_ga2_ga3", "df_cl2_cl3", "sptb", coord_fixed=FALSE)
+```
+
+logYM Fractional Difference for sptb & iptb
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("YMFD_1", "YMFD_2", "sptb")
+```
+
+Average logYM for sptb & iptb
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("avg_ym1_ym2", "avg_ym2_ym3", "sptb")
+```
+
+logYM diff vs GA diff on visit 1 & 2 for sptb & iptb
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("df_ga1_ga2", "df_ym1_ym2", "sptb", coord_fixed=FALSE)
+```
+
+logYM diff vs GA diff on visit 2 & 3 for sptb & iptb
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("df_ga2_ga3", "df_ym2_ym3", "sptb", coord_fixed=FALSE)
+```
+
+### Table 3a: Cervical characteristics in Aim 1 patients by Nulliparous/Multiparous Status 
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+table = data.frame(matrix("", nrow=9, ncol=0))
+for (i in c(1:3)) {
+  cl_visit = data_cl[
+    data_cl$redcap_event_name == paste0("visit_", i, "_arm_1"), ]
+  nulli_cl = cl_visit$cl_v1[cl_visit$nulliparous == "nulliparous"]
+  multi_cl = cl_visit$cl_v1[cl_visit$nulliparous == "multiparous"]
+  col = c(max_min_mean_sqrt(nulli_cl),
+          max_min_mean_sqrt(multi_cl),
+          kruskal.test(cl_v1 ~ nulliparous, data=cl_visit)$p.value)
+  table = cbind(table, col)
+}
+
+rownames(table) = c(
+  "Nulliparous (max)",
+  "Nulliparous (min)",
+  "Nulliparous (mean)",
+  "Nulliparous (std)",
+  "Multiparous (max)",
+  "Multiparous (min)",
+  "Multiparous (mean)",
+  "Multiparous (std)",
+  "P value")
+colnames(table) = c("CL T1", "CL T2", "CL T3")
+paged_table(table, options=list(rows.print=dim(table)[1]))
+```
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+table = data.frame(matrix("", nrow=9, ncol=0))
+for (i in c(1:3)) {
+  cl_visit = data_cl[
+    data_cl$redcap_event_name == paste0("visit_", i, "_arm_1"), ]
+  nulli_cl = cl_visit$PredYM[cl_visit$nulliparous == "nulliparous"]
+  multi_cl = cl_visit$PredYM[cl_visit$nulliparous == "multiparous"]
+  col = c(max_min_mean_sqrt(nulli_cl),
+          max_min_mean_sqrt(multi_cl),
+          kruskal.test(PredYM ~ nulliparous, data=cl_visit)$p.value)
+  table = cbind(table, col)
+}
+
+rownames(table) = c(
+  "Nulliparous (max)",
+  "Nulliparous (min)",
+  "Nulliparous (mean)",
+  "Nulliparous (std)",
+  "Multiparous (max)",
+  "Multiparous (min)",
+  "Multiparous (mean)",
+  "Multiparous (std)",
+  "P value")
+colnames(table) = c("logYM T1", "logYM T2", "logYM T3")
+paged_table(table, options=list(rows.print=dim(table)[1]))
+```
+
+Rate for CL shortening for Nulliparous
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+glm_nulliparous = glm(cl_v1 ~ redcap_event_name, 
+                      data_cl[data_cl$nulliparous == "nulliparous", ], 
+                      family=gaussian())
+summary(glm_nulliparous)
+```
+
+polynomial fit of cervical length vs GA - Nulliparous
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+lm_nulli_2 = lm(cl_v1 ~ ga + I(ga^2), 
+                data_cl[data_cl$nulliparous == "nulliparous", ],)
+summary(lm_nulli_2)
+# anova(lm_nulli_2)
+
+lm_nulli_3 = lm(cl_v1 ~ ga + I(ga^2) + I(ga^3), 
+                data_cl[data_cl$nulliparous == "nulliparous", ],)
+#summary(lm_nulli_3)
+
+anova(lm_nulli_3)
+```
+
+Rate for CL shortening for Multiparous
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+glm_multiparous = glm(cl_v1 ~ redcap_event_name, 
+                      data_cl[data_cl$nulliparous == "multiparous", ], 
+                      family=gaussian())
+summary(glm_multiparous)
+```
+
+polynomial fit of cervical length vs GA - Multiparous
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+lm_multi_2 = lm(cl_v1 ~ ga + I(ga^2), 
+                data_cl[data_cl$nulliparous == "multiparous", ],)
+summary(lm_multi_2)
+#anova(lm_multi_2)
+
+lm_multi_3 = lm(cl_v1 ~ ga + I(ga^2) + I(ga^3), 
+                data_cl[data_cl$nulliparous == "multiparous", ],)
+#summary(lm_multi_3)
+
+anova(lm_multi_3)
+```
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+summary(lm(PredYM ~ ga, data_cl[data_cl$nulliparous == "nulliparous", ]))
+summary(lm(PredYM ~ ga, data_cl[data_cl$nulliparous == "multiparous", ]))
+```
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+#plot_ly(data_cl, 
+#        x=~redcap_event_name, 
+#        y=~cl_v1, 
+#        color=~nulliparous, 
+#        type="box") %>% 
+#  layout(title="Nulliparous vs Multiparous",
+#       boxmode="group")
+
+violin_plot(data_cl, "cl_v1", "nulliparous", "multiparous", "nulliparous")
+
+violin_plot(data_cl, "PredYM", "nulliparous", "multiparous", "nulliparous")
+
+scatter_plot_smoothing(
+  data_cl, "cl_v1", "nulliparous", "multiparous", "nulliparous")
+
+scatter_plot_smoothing(
+  data_cl, "PredYM", "nulliparous", "multiparous", "nulliparous")
+
+#cl_density_plot(nulli_cl, 1, "nulliparous", "nulliparous", "multiparous")
+#cl_density_plot(nulli_cl, 2, "nulliparous", "nulliparous", "multiparous")
+#cl_density_plot(nulli_cl, 3, "nulliparous", "nulliparous", "multiparous")
+
+scatter_plot_3d(data_cl_df, "cl", "nulliparous")
+
+scatter_plot_3d(data_cl_df, "logYM", "nulliparous")
+```
+
+Multi-Normal Distributions fit for Cervical Length for Different Visit for nulliparous & multiparous
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+multi_normal.plot(2, "cl", "nulliparous", "multiparous", "nulliparous", 0.08)
+```
+
+Multi-Normal Distributions fit for Cervical Length for Different Visit for nulliparous & multiparous
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+multi_normal.plot(2, "logYM", "nulliparous", "multiparous", "nulliparous", 0.8)
+```
+
+
+Cervical Length Fractional Difference for nulliparous & multiparous
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("CLFD_1", "CLFD_2", "nulliparous")
+```
+
+Average Cervical Length for nulliparous & multiparous
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("avg_cl1_cl2", "avg_cl2_cl3", "nulliparous")
+```
+
+CL diff vs GA diff on visit 1 & 2 for nulliparous & multiparous
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("df_ga1_ga2", "df_cl1_cl2", "nulliparous", coord_fixed=FALSE)
+```
+
+CL diff vs GA diff on visit 2 & 3 for nulliparous & multiparous
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("df_ga2_ga3", "df_cl2_cl3", "nulliparous", coord_fixed=FALSE)
+```
+
+logYM Fractional Difference for nulliparous & multiparous
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("YMFD_1", "YMFD_2", "nulliparous")
+```
+
+Average logYM for nulliparous & multiparous
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("avg_ym1_ym2", "avg_ym2_ym3", "nulliparous")
+```
+
+logYM diff vs GA diff on visit 1 & 2 for nulliparous & multiparous
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("df_ga1_ga2", "df_ym1_ym2", "nulliparous", coord_fixed=FALSE)
+```
+
+logYM diff vs GA diff on visit 2 & 3 for nulliparous & multiparous
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("df_ga2_ga3", "df_ym2_ym3", "nulliparous", coord_fixed=FALSE)
+```
+
+### Table 3b: Cervical characteristics in Aim 1 -- Multiparous patients only 
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+table = data.frame(matrix("", nrow=18, ncol=0))
+for (i in c(1:3)) {
+  cl_visit = data_cl[
+    data_cl$redcap_event_name == paste0("visit_", i, "_arm_1"), ]
+  vd_1_cl = cl_visit$cl_v1[cl_visit$prior_vaginal_deliveries == "1"]
+  vd_2_cl = cl_visit$cl_v1[cl_visit$prior_vaginal_deliveries == "2/2+"]
+  cs_1_cl = cl_visit$cl_v1[cl_visit$number_prior_cs == "1"]
+  cs_2_cl = cl_visit$cl_v1[cl_visit$number_prior_cs == "2/2+"]
+  row = c(max_min_mean_sqrt(vd_1_cl),
+          max_min_mean_sqrt(vd_2_cl),
+          kruskal.test(cl_v1 ~ prior_vaginal_deliveries,
+                       data=cl_visit)$p.value,
+          max_min_mean_sqrt(cs_1_cl),
+          max_min_mean_sqrt(cs_2_cl),
+          kruskal.test(cl_v1 ~ number_prior_cs, 
+                       data=cl_visit)$p.value)
+  table = cbind(table, row)
+}
+
+rownames(table) = c(
+  "Only 1 prior VD (max)",
+  "Only 1 prior VD (min)",
+  "Only 1 prior VD (mean)",
+  "Only 1 prior VD (std)",
+  "2+ prior all VD (max)",
+  "2+ prior all VD (min)",
+  "2+ prior all VD (mean)",
+  "2+ prior all VD (std)",
+  "P value (Only 1 prior VD vd 2+ prior all VD)",
+  "Only 1 prior CS (max)",
+  "Only 1 prior CS (min)",
+  "Only 1 prior CS (mean)",
+  "Only 1 prior CS (std)",
+  "2+ prior all CS (max)",
+  "2+ prior all CS (min)",
+  "2+ prior all CS (mean)",
+  "2+ prior all CS (std)",
+  "P value (Only 1 prior CS vs 2+ prior all CS)")
+colnames(table) = c("CL T1", "CL T2", "CL T3")
+paged_table(table, options=list(rows.print=dim(table)[1]))
+```
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+table = data.frame(matrix("", nrow=18, ncol=0))
+for (i in c(1:3)) {
+  cl_visit = data_cl[
+    data_cl$redcap_event_name == paste0("visit_", i, "_arm_1"), ]
+  vd_1_cl = cl_visit$PredYM[cl_visit$prior_vaginal_deliveries == "1"]
+  vd_2_cl = cl_visit$PredYM[cl_visit$prior_vaginal_deliveries == "2/2+"]
+  cs_1_cl = cl_visit$PredYM[cl_visit$number_prior_cs == "1"]
+  cs_2_cl = cl_visit$PredYM[cl_visit$number_prior_cs == "2/2+"]
+  row = c(max_min_mean_sqrt(vd_1_cl),
+          max_min_mean_sqrt(vd_2_cl),
+          kruskal.test(PredYM ~ prior_vaginal_deliveries,
+                       data=cl_visit)$p.value,
+          max_min_mean_sqrt(cs_1_cl),
+          max_min_mean_sqrt(cs_2_cl),
+          kruskal.test(PredYM ~ number_prior_cs, 
+                       data=cl_visit)$p.value)
+  table = cbind(table, row)
+}
+
+rownames(table) = c(
+  "Only 1 prior VD (max)",
+  "Only 1 prior VD (min)",
+  "Only 1 prior VD (mean)",
+  "Only 1 prior VD (std)",
+  "2+ prior all VD (max)",
+  "2+ prior all VD (min)",
+  "2+ prior all VD (mean)",
+  "2+ prior all VD (std)",
+  "P value (Only 1 prior VD vd 2+ prior all VD)",
+  "Only 1 prior CS (max)",
+  "Only 1 prior CS (min)",
+  "Only 1 prior CS (mean)",
+  "Only 1 prior CS (std)",
+  "2+ prior all CS (max)",
+  "2+ prior all CS (min)",
+  "2+ prior all CS (mean)",
+  "2+ prior all CS (std)",
+  "P value (Only 1 prior CS vs 2+ prior all CS)")
+colnames(table) = c("logYM T1", "logYM T2", "logYM T3")
+paged_table(table, options=list(rows.print=dim(table)[1]))
+```
+
+#### Only 1 prior VD vs 2+ prior all VD
+
+Rate for CL shortening for Only 1 prior VD
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+glm_vd_1 = glm(cl_v1 ~ redcap_event_name, 
+               data_cl[data_cl$prior_vaginal_deliveries == "1", ], 
+               family=gaussian())
+summary(glm_vd_1)
+```
+
+polynomial fit of cervical length vs GA - Only 1 prior VD
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+lm_vd_1_2 = lm(cl_v1 ~ ga + I(ga^2), 
+                data_cl[data_cl$prior_vaginal_deliveries == "1", ],)
+summary(lm_vd_1_2)
+# anova(lm_vd_1_2)
+
+lm_vd_1_3 = lm(cl_v1 ~ ga + I(ga^2) + I(ga^3), 
+                data_cl[data_cl$prior_vaginal_deliveries == "1", ],)
+summary(lm_vd_1_3)
+
+# anova(lm_vd_1_3)
+```
+
+Rate for CL shortening for 2+ prior all VD
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+glm_vd_2 = glm(cl_v1 ~ redcap_event_name, 
+               data_cl[data_cl$prior_vaginal_deliveries == "2/2+", ], 
+               family=gaussian())
+summary(glm_vd_2)
+```
+
+polynomial fit of cervical length vs GA - 2+ prior all VD
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+lm_vd_2_2 = lm(cl_v1 ~ ga + I(ga^2), 
+                data_cl[data_cl$prior_vaginal_deliveries == "2/2+", ],)
+summary(lm_vd_2_2)
+# anova(lm_vd_2_2)
+
+lm_vd_2_3 = lm(cl_v1 ~ ga + I(ga^2) + I(ga^3), 
+                data_cl[data_cl$prior_vaginal_deliveries == "2/2+", ],)
+# summary(lm_vd_2_3)
+
+anova(lm_vd_2_3)
+```
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+summary(lm(PredYM ~ ga, data_cl[data_cl$prior_vaginal_deliveries == "1", ]))
+summary(lm(PredYM ~ ga, 
+           data_cl[data_cl$prior_vaginal_deliveries == "2/2+", ]))
+```
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+#plot_ly(data_cl, 
+#        x=~redcap_event_name, 
+#        y=~cl_v1, 
+#        color=~prior_vaginal_deliveries, 
+#        type="box") %>% 
+#  layout(title="Only 1 prior VD vs 2+ prior all VD",
+#       boxmode="group")
+
+violin_plot(data_cl, "cl_v1", "1", "2/2+", "prior_vaginal_deliveries")
+
+violin_plot(data_cl, "PredYM", "1", "2/2+", "prior_vaginal_deliveries")
+
+scatter_plot_smoothing(data_cl, "cl_v1",
+                       "1", "2/2+", "prior_vaginal_deliveries")
+
+scatter_plot_smoothing(data_cl, "PredYM",
+                       "1", "2/2+", "prior_vaginal_deliveries")
+
+scatter_plot_3d(data_cl_df, "cl", "prior_vaginal_deliveries")
+
+scatter_plot_3d(data_cl_df, "logYM", "prior_vaginal_deliveries")
+
+#cl_density_plot(vd_cl, 1, "prior_vaginal_deliveries", "1", "2/2+")
+#cl_density_plot(vd_cl, 2, "prior_vaginal_deliveries", "1", "2/2+")
+#cl_density_plot(vd_cl, 3, "prior_vaginal_deliveries", "1", "2/2+")
+```
+
+Multi-Normal Distributions fit for Cervical Length for 1 and 2/2+ VD
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+multi_normal.plot(2, "cl", "prior_vaginal_deliveries", "1", "2/2+", 0.08)
+```
+
+Multi-Normal Distributions fit for Cervical Length for 1 and 2/2+ VD
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE, results='hide'}
+multi_normal.plot(2, "logYM", "prior_vaginal_deliveries", "1", "2/2+", 1.3)
+
+```
+
+
+Cervical Length Fractional Difference for 1 and 2/2+ VD
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("CLFD_1", "CLFD_2", "prior_vaginal_deliveries")
+```
+
+Average Cervical Length for 1 & 2/2+ VD
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("avg_cl1_cl2", "avg_cl2_cl3", "prior_vaginal_deliveries")
+```
+
+CL diff vs GA diff on visit 1 & 2 for 1 & 2/2+ VD"
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("df_ga1_ga2", "df_cl1_cl2", "prior_vaginal_deliveries", coord_fixed=FALSE)
+```
+
+CL diff vs GA diff on visit 2 & 3 for 1 & 2/2+ VD
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("df_ga2_ga3", "df_cl2_cl3", "prior_vaginal_deliveries", coord_fixed=FALSE)
+```
+
+logYM Fractional Difference for 1 & 2/2+ VD
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("YMFD_1", "YMFD_2", "prior_vaginal_deliveries")
+```
+
+Average logYM for 1 & 2/2+ VD
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("avg_ym1_ym2", "avg_ym2_ym3", "prior_vaginal_deliveries")
+```
+
+logYM diff vs GA diff on visit 1 & 2 for 1 & 2/2+ VD
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("df_ga1_ga2", "df_ym1_ym2", "prior_vaginal_deliveries", coord_fixed=FALSE)
+```
+
+logYM diff vs GA diff on visit 2 & 3 for Term & Preterm
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("df_ga2_ga3", "df_ym2_ym3", "prior_vaginal_deliveries", coord_fixed=FALSE)
+```
+
+#### Only 1 prior CS vs 2+ prior all CS
+
+Rate for CL shortening for Only 1 prior CS 
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+glm_cs_1 = glm(cl_v1 ~ redcap_event_name, 
+               data_cl[data_cl$number_prior_cs == "1", ], 
+               family=gaussian())
+summary(glm_cs_1)
+```
+
+polynomial fit of cervical length vs GA - Only 1 prior CS
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+lm_cs_1_2 = lm(cl_v1 ~ ga + I(ga^2), 
+                data_cl[data_cl$number_prior_cs == "1", ],)
+summary(lm_cs_1_2)
+# anova(lm_cs_1_2)
+
+lm_cs_1_3 = lm(cl_v1 ~ ga + I(ga^2) + I(ga^3), 
+                data_cl[data_cl$number_prior_cs == "1", ],)
+# summary(lm_cs_1_3)
+
+anova(lm_cs_1_3)
+```
+
+Rate for CL shortening for 2+ prior all CS
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+glm_cs_2 = glm(cl_v1 ~ redcap_event_name, 
+               data_cl[data_cl$number_prior_cs == "2/2+", ], 
+               family=gaussian())
+summary(glm_cs_2)
+```
+
+polynomial fit of cervical length vs GA - Only 1 prior CS
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+lm_cs_2_2 = lm(cl_v1 ~ ga + I(ga^2), 
+                data_cl[data_cl$number_prior_cs == "2/2+", ],)
+#summary(lm_cs_2_2)
+anova(lm_cs_2_2)
+
+lm_cs_2_3 = lm(cl_v1 ~ ga + I(ga^2) + I(ga^3), 
+                data_cl[data_cl$number_prior_cs == "2/2+", ],)
+#summary(lm_cs_2_3)
+
+anova(lm_cs_2_3)
+```
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+summary(lm(PredYM ~ ga, data_cl[data_cl$number_prior_cs == "1", ]))
+summary(lm(PredYM ~ ga, data_cl[data_cl$number_prior_cs == "2/2+", ]))
+```
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+#plot_ly(data_cl, 
+#        x=~redcap_event_name, 
+#        y=~cl_v1, 
+#        color=~number_prior_cs, 
+#        type="box") %>% 
+#  layout(title="Only 1 prior CS vs 2+ prior all CS",
+#       boxmode="group")
+
+violin_plot(data_cl, "cl_v1", "1", "2/2+", "number_prior_cs")
+
+violin_plot(data_cl, "PredYM", "1", "2/2+", "number_prior_cs")
+
+scatter_plot_smoothing(data_cl, "cl_v1",
+                       "1", "2/2+", "number_prior_cs")
+
+scatter_plot_smoothing(data_cl, "PredYM",
+                       "1", "2/2+", "number_prior_cs")
+
+scatter_plot_3d(data_cl_df, "cl", "number_prior_cs")
+
+scatter_plot_3d(data_cl_df, "logYM", "number_prior_cs")
+
+#cl_density_plot(cs_cl, 1, "number_prior_cs", "1", "2/2+")
+#cl_density_plot(cs_cl, 2, "number_prior_cs", "1", "2/2+")
+#cl_density_plot(cs_cl, 3, "number_prior_cs", "1", "2/2+")
+
+```
+
+Cervical Length Fractional Difference for 1 and 2/2+ CS
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("CLFD_1", "CLFD_2", "number_prior_cs")
+```
+
+Average CL for 1 & 2/2+ CS
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("avg_cl1_cl2", "avg_cl2_cl3", "number_prior_cs")
+```
+
+CL diff vs GA diff on visit 1 & 2 for 1 & 2/2+ CS
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("df_ga1_ga2", "df_cl1_cl2", "number_prior_cs", coord_fixed=FALSE)
+```
+
+CL diff vs GA diff on visit 2 & 3 for 1 & 2/2+ CS
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("df_ga2_ga3", "df_cl2_cl3", "number_prior_cs", coord_fixed=FALSE)
+```
+
+logYM Fractional Difference for 1 and 2/2+ CS
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("YMFD_1", "YMFD_2", "number_prior_cs")
+```
+
+Average logYM for 1 and 2/2+ CS
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("avg_ym1_ym2", "avg_ym2_ym3", "number_prior_cs")
+```
+
+logYM diff vs GA diff on visit 1 & 2 for 1 and 2/2+ CS
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("df_ga1_ga2", "df_ym1_ym2", "number_prior_cs", coord_fixed=FALSE)
+```
+
+logYM diff vs GA diff on visit 2 & 3 for 1 and 2/2+ CS
+
+```{r message=FALSE, warning=FALSE, fold.output=FALSE, fold.plot=FALSE}
+marginal_plot("df_ga2_ga3", "df_ym2_ym3", "number_prior_cs", coord_fixed=FALSE)
+```
+

@@ -1,0 +1,610 @@
+---
+title: "Obstetrics and Gynecology (ObGyn) Cervical Tissue Stiffness Study"
+author: Molly Stout, Peinan Zhao, ... , Simeone Marino, Mingyi Tang, Yang Chen, Ivo D. Dinov
+date: "`r format(Sys.time(), '%D %B %Y')`"
+output:
+  html_document: 
+    theme: spacelab
+    highlight: tango
+    toc: yes
+    number_sections: yes
+    toc_depth: 4
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+tags:
+- DSPA
+- SOCR
+- OBGYN
+- Predictive Analytics
+subtitle: "Fully Quantitative Cervical Elastography System (FQ-CES) - Modeling, Validation & Analytics"
+always_allow_html: true
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache=TRUE, echo=TRUE, message=FALSE, warning=FALSE)
+library(dplyr)
+library(reshape2)
+library(rmarkdown)
+```
+
+
+# Data Wrangling, Imputation and Rebalancing
+
+ADD SOME TEXT HERE ON THE PROTOCOL USED
+
+```{r eval=FALSE}
+#setwd(file.path("C:/Users/11191/Desktop/2022Fall/MDP/SOCR_OBGYN_MollyStout_AncaTilea_2022/Pilot_data"))
+data = read.csv("FullyQuantitativeCer_DATA_2022-11-02_0853.csv", stringsAsFactors=TRUE)
+ym = read.csv("logYM_Updated.csv", stringsAsFactors=TRUE) %>%
+  distinct(record_id, pvisit, .keep_all = TRUE)
+#dim(data)
+#dim(data_um)
+# Hmisc::describe(data)
+```
+
+Calculation before building the new data frame
+
+```{r eval=FALSE}
+data_general = data[!is.na(data$a1_consented), ]
+data_general = data_general[data_general$redcap_event_name == "general_arm_1" &
+                              data_general$a1_consented==1, ]
+data_general$delivery_ga = 
+  data_general$delivery_ga_weeks * 7 + data_general$delivery_ga_days
+data_general$preterm_birth[
+  is.na(data_general$preterm_birth) | data_general$preterm_birth == 3] =
+  as.numeric(
+    !(data_general$delivery_ga_weeks[
+      is.na(data_general$preterm_birth) | 
+        data_general$preterm_birth == 3] < 37)) + 1
+data_general$bmi = data_general$bmi_1st_visit
+data_general$education_level = data_general$education
+data_general$insurance_status = data_general$insurance
+data_general$preterm_history = data_general$preterm > 0
+data_general$age = as.numeric(difftime(data_general$edc, 
+                                       data_general$dob) / 365)
+data_general = data_general[c("record_id",
+                              "delivery_ga",
+                              "preterm_birth",
+                              "race", 
+                              "age", 
+                              "bmi",
+                              "education_level",
+                              "employed",
+                              "insurance_status",
+                              "preterm_history",
+                              "sptb",
+                              "term",
+                              "preterm",
+                              "prior_vaginal_deliveries",
+                              "number_prior_cs")]
+data_visit = data[data$redcap_event_name != "general_arm_1",
+                  c("record_id", 
+                    "redcap_event_name", 
+                    "cl_v1", 
+                    "ga_wks_a1", 
+                    "ga_days_a1")]
+data_visit = data_visit[data_visit$record_id %in% data_general$record_id, ]
+data_visit$ga_wks_a1 = as.numeric(as.character(data_visit$ga_wks_a1))
+data_visit$ga_days_a1 = as.numeric(as.character(data_visit$ga_days_a1))
+data_visit$ga = 7 * data_visit$ga_wks_a1 + data_visit$ga_days_a1
+data_visit = left_join(data_visit, ym, 
+                       by=c("record_id" = "record_id", "ga" = "pvisit"))
+
+data_visit = dcast(
+  data_visit[c("record_id", "redcap_event_name", "cl_v1")], 
+  record_id ~ redcap_event_name) %>%
+  inner_join(dcast(data_visit[c("record_id", "redcap_event_name", "ga")], 
+                   record_id ~ redcap_event_name),
+             by="record_id") %>%
+  inner_join(dcast(data_visit[c("record_id", "redcap_event_name", "PredYM")], 
+                   record_id ~ redcap_event_name),
+             by="record_id")
+colnames(data_visit)[2:10] = c("cl_1", "cl_2", "cl_3",
+                               "ga_1", "ga_2", "ga_3",
+                               "PredYM_1", "PredYM_2", "PredYM_3")
+data_visit = left_join(data_general, data_visit, by="record_id")
+```
+
+```{r eval=FALSE}
+library(missForest)
+
+data = data_visit
+
+data = data[!is.na(data$preterm_birth) & data$preterm_birth != 3, ]
+delivery_ga = data$delivery_ga
+data = select(data, -delivery_ga)
+data$preterm_birth = as.factor(-data$preterm_birth + 2)
+preterm_birth = data$preterm_birth
+data = select(data, -preterm_birth)
+
+data$race = as.factor(data$race)
+
+data$employed = as.factor(data$employed)
+
+data$insurance_status = as.factor(data$insurance_status)
+
+data$preterm_history = as.factor(as.numeric(data$preterm_history))
+
+data$sptb = as.factor(-data$sptb + 2)
+sptb = data$sptb
+data = select(data, -sptb)
+
+data$prior_vaginal_deliveries[data$term + data$preterm == 0] = 0
+data$number_prior_cs[data$term + data$preterm == 0] = 0
+data$prior_vaginal_deliveries[is.na(data$prior_vaginal_deliveries)] = 
+  (data$preterm + data$term
+   - data$number_prior_cs)[is.na(data$prior_vaginal_deliveries)]
+data$number_prior_cs[is.na(data$number_prior_cs)] = 
+  (data$preterm + data$term 
+   - data$prior_vaginal_deliveries)[is.na(data$number_prior_cs)]
+
+data[unlist(lapply(data, is.numeric))][
+  data[unlist(lapply(data, is.numeric))] < 0] = NA
+
+rownames(data) = data$record_id
+data = select(data, -record_id)
+
+data = missForest(data, verbose=T)$ximp
+
+data$cl_fd_1 = (data$cl_1 - data$cl_2) / data$cl_1
+data$cl_fd_2 = (data$cl_2 - data$cl_3) / data$cl_2
+data$PredYM_fd_1 = (data$PredYM_1 - data$PredYM_2) / data$PredYM_1
+data$PredYM_fd_2 = (data$PredYM_2 - data$PredYM_3) / data$PredYM_2
+data$change_1 = data$ga_2 - data$ga_1
+data$change_2 = data$ga_3 - data$ga_2
+
+data_um = data[grepl("20-", rownames(data)), ]
+delivery_ga_um = delivery_ga[grepl("20-", rownames(data))]
+preterm_birth_um = preterm_birth[grepl("20-", rownames(data))]
+sptb_um = sptb[grepl("20-", rownames(data))]
+```
+
+```{r eval=FALSE}
+rm(data_general)
+#rm(data_visit)
+rm(ym)
+save.image("predict_preterm_data.RData")
+```
+
+These are the unbalanced/original dataset dimensions
+
+```{r}
+load("predict_preterm_data.RData")
+#dim(data_um)
+table(preterm_birth_um)
+
+```
+
+# Survival Analysis
+
+## Kaplan-Meier Method
+
+```{r}
+library(survival)
+
+m1 = survfit(Surv(delivery_ga_um, rep(1, length(delivery_ga_um))) ~ 1)
+summary(m1)
+plot(m1)
+plot(m1$time, -log(m1$surv), type="l")
+plot(log(m1$time), log(-log(m1$surv)), type="l")
+```
+
+Log Survival Plot: Concave up, the probability of delivery is increasing over time.
+
+Since both plots are not straight lines, time to deliver neither follows an Exponential distribution nor a Weibull distribution.
+
+### Effect of whether theres is a third visit of a patient
+
+```{r}
+model_ga_3 = survfit(
+  Surv(delivery_ga, rep(1, length(delivery_ga))) ~ is.na(ga_3),
+  data=data_visit)
+plot(model_ga_3, col=c(3, 4), lty=1:2)
+survdiff(
+  Surv(delivery_ga, rep(1, length(delivery_ga))) ~ is.na(ga_3),
+  data=data_visit)
+survdiff(
+  Surv(delivery_ga, rep(1, length(delivery_ga))) ~ is.na(ga_3),
+  data=data_visit, rho=1)
+legend(10, 0.8, c("FALSE", "TRUE"), col=c(3, 4), lty=1:2)
+```
+
+
+## Parametric Regression Model
+
+```{r}
+library(ggplot2)
+ggplot(NULL, aes(x=delivery_ga_um)) + 
+  geom_histogram(aes(y=..density..), color="black", fill="white", bins=100) +
+  geom_density(alpha=.2, fill="#FF6666") +
+  scale_x_log10()
+```
+
+### Log-Normal disribution
+
+```{r}
+data_surv = cbind(delivery_ga_um, data_um)
+
+linear_fit = survreg(
+  Surv(delivery_ga_um, rep(1, length(delivery_ga_um))) ~ ., 
+  data = data_surv,
+  dist="lognormal")
+summary(linear_fit)
+
+library(car)
+qqPlot(residuals(linear_fit))
+```
+
+Interpretation Example:
+
+The signs of the coefficients tell us the direction of the relationship.
+
+The positive coefficient for `preterm_history1` indicates that those who have preterm history have longer time to deliver than those who did not. If we calculate $e^{\hat{\beta}}$, we get the estimated ratio of the expected gestational age of delivery for the two groups. In the case, the estimation is $e^{0.024144} = 1.027841$. Therefore, controlling for other predictors in the model, the expected time to deliver for those who have preterm history is $2.7841\%$ higher than those who do not have preterm history.
+
+The negative coefficient for `race6` indicates that those who are Hispanic or Latino have shorter time to deliver.
+
+### Extreme-Value distribution
+
+```{r}
+extreme_value_dist = survreg(
+  Surv(delivery_ga_um, rep(1, length(delivery_ga_um))) ~ 
+    age + bmi + term + preterm + 
+    cl_1 + cl_2 + cl_3 + ga_1 + ga_2 + ga_3 + PredYM_1 + PredYM_2 + PredYM_3,
+  data = data_surv,
+  dist="extreme")
+summary(extreme_value_dist)
+
+qqPlot(residuals(extreme_value_dist))
+```
+
+Interpretation example:
+
+For a quantitative variable such as `ga_3`, we exponentiate the coefficient estimator to get the increase in the expected time to deliver for a one-unit increase in the variable.
+
+`term` has a negative coefficient, so the estimation is $e^{-2.2997} = 0.1002889$. According to the model then, a one-unit increase in `term` is associated with a $1 - 0.1002889 = 89.97111\%$ percent decrease in expected time to deliver, holding other predictors constant.
+
+## Proportional Hazards Model
+
+```{r}
+proportional_hazards_model = coxph(
+  Surv(delivery_ga_um, rep(1, length(delivery_ga_um))) ~ 
+    age + bmi + term + preterm + 
+    cl_1 + cl_2 + cl_3 + ga_1 + ga_2 + ga_3 + PredYM_1 + PredYM_2 + PredYM_3,
+  data = data_surv
+)
+summary(proportional_hazards_model)
+
+qqPlot(residuals(proportional_hazards_model))
+```
+
+Interpretation example:
+
+For a one unit increase in the variable `cl_3`, the hazard ratio is $e^{-0.031914} = 0.9685899$. This means that the hazard of delivery goes down by an estimated $3.14101\%$.
+
+<!--
+
+# CBDA with original data
+
+```{r cache=FALSE, eval=FALSE}
+library(SuperLearner)
+
+#randomForest_learners = 
+#  create.Learner(
+#    "SL.randomForest",
+#    tune=list(mtry=floor(sqrt(ncol(x_train)) * c(0.25, 0.5, 1, 2, 4)),
+#              ntree=nrow(x_train) * c(0.125, 0.25, 0.5, 1, 2, 4)))
+
+#ranger_learners = 
+#  create.Learner(
+#    "SL.ranger",
+#    tune=list(num.trees=nrow(x_train) * c(0.125, 0.25, 0.5, 1, 2, 4),
+#              mtry = floor(sqrt(ncol(x_train)) * c(0.25, 0.5, 1, 2, 4))))
+
+#xgboost_learners = 
+#  create.Learner(
+#    "SL.xgboost",
+#    tune=list(ntrees=nrow(x_train) * c(0.125, 0.25, 0.5, 1, 2, 4),
+#              max_depth = c(4, 8, 16),
+#              shrinkage = c(0.025, 0.05, 0.1, 0.2)))
+
+
+model = function(X, Y, newX, newY, features=NULL) {
+  if (is.null(features)) {
+    features = colnames(X)
+  }
+  sl = SuperLearner(
+    Y=Y,
+    X=X,
+    newX=newX,
+    family=binomial(),
+    cvControl=list(stratifyCV=TRUE),
+    SL.library=c(#"SL.cforest",
+                 "SL.gbm", 
+                 "SL.knn",
+                 "SL.ksvm", 
+                 #randomForest_learners$names,
+                 #ranger_learners$names,
+                 #xgboost_learners$names,
+                 "SL.randomForest",
+                 "SL.ranger",
+                 "SL.xgboost"),
+    verbose=TRUE)
+  pred_rocr = ROCR::prediction(sl$SL.predict, newY)
+  auc = ROCR::performance(
+    pred_rocr, measure="auc", x.measure="cutoff")@y.values[[1]]
+  y_pred = factor(as.numeric(sl$SL.predict > 0.5), levels=c(0, 1))
+  stats = caret::confusionMatrix(y_pred, as.factor(newY))
+  return(list(sl=sl, auc=auc, stats=stats, y_pred=y_pred))
+}
+```
+
+## Predictive model on the original unbalanced data including all the features (internal validation only)
+
+```{r, eval=FALSE}
+set.seed(1)
+model_unbalance = model(data_um, 
+                        as.numeric(as.character(preterm_birth_um)),
+                        data_um,
+                        as.numeric(as.character(preterm_birth_um)))
+model_unbalance$sl
+model_unbalance$auc
+model_unbalance$stats
+```
+
+
+```{r, eval=FALSE}
+library(DT)
+
+validation_result = data.frame(matrix(ncol=0, nrow=length(preterm_birth_um)))
+rownames(validation_result) = rownames(data_um)
+validation_result$ground_truth = as.numeric(as.character(preterm_birth_um))
+
+for (i in 1:20) {
+  set.seed(i)
+  model_ex_valid = model(data_um, 
+                         as.numeric(as.character(preterm_birth_um)),
+                         data_um,
+                         as.numeric(as.character(preterm_birth_um)))
+  validation_result = cbind(validation_result, 
+                            as.numeric(as.character(model_ex_valid$y_pred)))
+}
+
+miss_classify = data.frame(
+  apply(abs(validation_result[2:dim(validation_result)[2]] -
+              validation_result$ground_truth), 1, sum))
+miss_classify = cbind(miss_classify,
+                      as.numeric(as.character(preterm_birth_um)))
+colnames(miss_classify) = c("miss_classify_count", "ground_truth")
+
+datatable(miss_classify, filter="top",
+          options=list(pageLength=10, autoWidth=TRUE))
+```
+
+
+
+# CBDA with rebalanced data
+
+These are the rebalanced dataset dimensions
+
+
+```{r, eval=FALSE}
+library(DMwR)
+
+data_um_balanced = SMOTE(preterm_birth_um ~ ., 
+                         cbind(preterm_birth_um, data_um), 
+                         perc.over=400, perc.under=125)
+preterm_birth_um_balanced = data_um_balanced$preterm_birth_um
+data_um_balanced = select(data_um_balanced, -preterm_birth_um)
+preterm_birth_um_balanced = as.numeric(as.character(preterm_birth_um_balanced))
+
+dim(data_um_balanced)
+table(preterm_birth_um_balanced)
+```
+
+## Predictive model on the rebalanced data including all the features (internal validation only) - POSITIVE CONTROL
+
+```{r, eval=FALSE}
+x_train = data_um_balanced
+x_valid = x_train
+y_train = preterm_birth_um_balanced
+y_valid = y_train
+
+model_unbalance = model()
+model_unbalance$sl
+model_unbalance$auc
+model_unbalance$stats
+```
+
+## Predictive model including all the features
+
+We rebalanced the data so we can test a predictive model with external validation data (training/validation, either 80%/20% or 90%/10%).
+
+```{r, eval=FALSE}
+held_up = 0.8
+print(held_up)
+
+train_obs = sample(nrow(data_um_balanced), 
+                   round(nrow(data_um_balanced) * held_up))
+x_train = data_um_balanced[train_obs, ]
+x_valid = data_um_balanced[-train_obs, ]
+y_train = preterm_birth_um_balanced[train_obs]
+y_valid = preterm_birth_um_balanced[-train_obs]
+```
+
+These are all the features included in the model
+
+*race, age, bmi, education_level, employed, insurance_status, preterm_history, term, preterm, prior_vaginal_deliveries, number_prior_cs, cl_1, cl_2, cl_3, ga_1, ga_2, ga_3, logYM_1, logYM_2, logYM_3, cl_fd_1, cl_fd_2, logYM_fd_1, logYM_fd_2, range_1, range_2*
+
+
+```{r, eval=FALSE}
+model_all = model()
+model_all$sl
+model_all$auc
+model_all$stats
+```
+
+## Predictive model including the features returned by Knockoff 
+
+```{r, eval=FALSE}
+library(knockoff)
+
+filtered_features = names(
+  knockoff.filter(
+    data_um_balanced[unlist(lapply(data_um_balanced, is.numeric))], 
+    preterm_birth_um_balanced, fdr=0.5)$selected)
+filtered_features
+```
+
+```{r, eval=FALSE}
+model_ko = model(filtered_features)
+model_ko$sl
+model_ko$auc
+model_ko$stats
+```
+
+## Predictive model including a subset of clinical features 
+
+These are the features included: 
+
+*race, age, bmi, education_level, employed, insurance_status, and preterm_history*.
+
+```{r, eval=FALSE}
+model_cc = model(c("race", 
+                   "age", 
+                   "bmi", 
+                   "education_level", 
+                   "employed", 
+                   "insurance_status", 
+                   "preterm_history"))
+model_cc$sl
+model_cc$auc
+model_cc$stats
+```
+
+```{r, eval=FALSE}
+model_ym1 = model(c("logYM_1"))
+model_ym1$sl
+model_ym1$auc
+model_ym1$stats
+```
+
+```{r, eval=FALSE}
+model_ym2 = model(c("logYM_2"))
+model_ym2$sl
+model_ym2$auc
+model_ym2$stats
+```
+
+```{r, eval=FALSE}
+model_ymchange = model(c("logYM_fd_1"))
+model_ymchange$sl
+model_ymchange$auc
+model_ymchange$stats
+```
+
+```{r, eval=FALSE}
+model_cl1 = model(c("cl_1"))
+model_cl1$sl
+model_cl1$auc
+model_cl1$stats
+```
+
+```{r, eval=FALSE}
+model_cl2 = model(c("cl_2"))
+model_cl2$sl
+model_cl2$auc
+model_cl2$stats
+```
+
+```{r, eval=FALSE}
+model_cc_ym1 = model(c("race", 
+                       "age", 
+                       "bmi", 
+                       "education_level", 
+                       "employed", 
+                       "insurance_status", 
+                       "preterm_history",
+                       "logYM_1"))
+model_cc_ym1$sl
+model_cc_ym1$auc
+model_cc_ym1$stats
+```
+
+```{r, eval=FALSE}
+model_cc_ym2 = model(c("race", 
+                       "age", 
+                       "bmi", 
+                       "education_level", 
+                       "employed", 
+                       "insurance_status", 
+                       "preterm_history",
+                       "logYM_2"))
+model_cc_ym2$sl
+model_cc_ym2$auc
+model_cc_ym2$stats
+```
+
+```{r, eval=FALSE}
+model_cc_ymchange = model(c("race", 
+                            "age", 
+                            "bmi", 
+                            "education_level", 
+                            "employed", 
+                            "insurance_status", 
+                            "preterm_history",
+                            "logYM_fd_1"))
+model_cc_ymchange$sl
+model_cc_ymchange$auc
+model_cc_ymchange$stats
+```
+
+```{r, eval=FALSE}
+model_cc_cl1 = model(c("race", 
+                       "age", 
+                       "bmi",
+                       "education_level", 
+                       "employed", 
+                       "insurance_status", 
+                       "preterm_history",
+                       "cl_1"))
+model_cc_cl1$sl
+model_cc_cl1$auc
+model_cc_cl1$stats
+```
+
+```{r, eval=FALSE}
+model_cc_cl2 = model(c("race", 
+                       "age", 
+                       "bmi",
+                       "education_level", 
+                       "employed", 
+                       "insurance_status", 
+                       "preterm_history",
+                       "cl_2"))
+model_cc_cl2$sl
+model_cc_cl2$auc
+model_cc_cl2$stats
+```
+
+```{r, eval=FALSE}
+model_final = model(c("race", 
+                      "age", 
+                      "bmi",
+                      "education_level", 
+                      "employed", 
+                      "insurance_status", 
+                      "preterm_history",
+                      "cl_1",
+                      "cl_2",
+                      "logYM_1",
+                      "logYM_2",
+                      "logYM_fd_1"))
+model_final$sl
+model_final$auc
+model_final$stats
+```
+
+-->
